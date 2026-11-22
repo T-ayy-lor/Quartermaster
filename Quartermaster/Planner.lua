@@ -306,7 +306,8 @@ end
 P.Vendors = vendorsInOrder
 
 -- Cheapest recorded gold price per item at vendors this character can use:
--- { [item] = { unit, npc, name, stock } }. Items that cost anything besides gold are left out.
+-- { [item] = { unit, npc, name } }. Items that cost anything besides gold, or that the vendor
+-- stocks in limited numbers, are left out.
 function P.VendorPrices(key)
   local who, out, here = info(key), {}, P.Here()
   for npc, v in vendorsInOrder() do
@@ -314,7 +315,9 @@ function P.VendorPrices(key)
       local spot = P.Npc(npc)
       for _, it in ipairs(list(v.items)) do
         local price, item = it.price, it.id
-        if item and price and price > 0 and not it.costs then
+        -- Something a vendor stocks only one or two of (it restocks slowly) isn't a place to buy
+        -- materials: a plan can't count on it.
+        if item and price and price > 0 and not it.costs and it.stock == nil then
           local unit = price / max(1, it.stack or 1)
           local old = out[item]
           -- At the same price, the nearest vendor (or the one you visited most recently, when
