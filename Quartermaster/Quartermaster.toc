@@ -20,5 +20,6 @@ Planner.lua
 PlannerGoals.lua
 PlannerJobs.lua
 Plan.lua
+Tooltip.lua
 UI.lua
 Slash.lua

@@ -212,8 +212,18 @@ local function ViewOf(plan)
   v.target = t
   local need, order = {}, {}
   if ready then
-    for _, list in ipairs({ level and level.steps or {}, t.tail or {} }) do
-      for _, step in ipairs(type(list) == "table" and list or {}) do v.steps[#v.steps + 1] = step end
+    local lead = level and type(level.steps) == "table" and level.steps or {}
+    local tail = type(t.tail) == "table" and t.tail or {}
+    -- One trip per vendor: the goal's own purchases join the skill plan's earlier trip there.
+    if ns.Goals and ns.Goals.FoldBuys then
+      plan.folds = type(plan.folds) == "table" and plan.folds or {}
+      local goal = tostring(plan.selected)
+      plan.folds[goal] = plan.folds[goal] or {}
+      local ok, a, b = pcall(ns.Goals.FoldBuys, lead, tail, plan.folds[goal])
+      if ok and type(a) == "table" and type(b) == "table" then lead, tail = a, b end
+    end
+    for _, list in ipairs({ lead, tail }) do
+      for _, step in ipairs(list) do v.steps[#v.steps + 1] = step end
     end
     for _, list in ipairs({ level and level.mats or {}, t.mats or {} }) do
       for _, mat in ipairs(type(list) == "table" and list or {}) do
@@ -227,6 +237,11 @@ local function ViewOf(plan)
         end
       end
     end
+  end
+  -- What the plan's crafts have used up since it was worked out is no longer needed.
+  local used = type(plan.usedMats) == "table" and plan.usedMats[tostring(plan.selected)] or nil
+  if used then
+    for _, mat in ipairs(order) do mat.need = math.max(0, mat.need - (used[mat.item] or 0)) end
   end
   table.sort(order, function(a, b) return tostring(a.name) < tostring(b.name) end)
   v.mats = order
@@ -476,11 +491,27 @@ local function OnCraft(_, unit, _, spellID)
       -- Crafting a recipe marks it as made in the dropdown straight away.
       local crafted = Target(plan, "recipe:" .. tostring(spellID))
       if crafted and not crafted.made then crafted.made = true end
+      local counted, planned = false, false
       for _, step in ipairs(ViewOf(plan).steps) do
-        if step.k == "make" and step.spell == spellID and not step.done then
-          step.made = (step.made or 0) + 1
-          break
+        if step.spell == spellID and not step.done and (step.k == "make" or step.k == "craft") then
+          planned = true
+          if step.k == "make" and not counted then
+            step.made = (step.made or 0) + 1
+            counted = true
+          end
         end
+      end
+      -- A craft the plan asked for used its materials up: the plan needs that much less of
+      -- them now. (The materials list would otherwise ask for them all over again.)
+      if planned and crafted and type(crafted.req) == "table" then
+        local goal = tostring(plan.selected)
+        plan.usedMats = type(plan.usedMats) == "table" and plan.usedMats or {}
+        local used = plan.usedMats[goal] or {}
+        plan.usedMats[goal] = used
+        for _, pair in ipairs(crafted.req) do
+          if pair[1] then used[pair[1]] = (used[pair[1]] or 0) + (pair[2] or 1) end
+        end
+        views[plan] = nil
       end
     end
   end
@@ -1051,19 +1082,29 @@ local function HostOverhang(host)
   return most - right
 end
 
--- Where the window goes. With the profession window open: beside it, as tall as it is. Without
--- it: the right of the screen.
--- The auction house window (whichever kind this client has), when it's open.
-local function AuctionWindow()
-  for _, frame in ipairs({ _G.AuctionHouseFrame, _G.AuctionFrame }) do
+-- The game windows the plan comes up beside, and the kinds of step each one is for. The
+-- auction house has none: the plan you last looked at always comes up there.
+local VENUES = {
+  auction  = { frames = { "AuctionHouseFrame", "AuctionFrame" } },
+  merchant = { frames = { "MerchantFrame" }, steps = { buy = true, learn = true } },
+  trainer  = { frames = { "ClassTrainerFrame" }, steps = { learn = true, rank = true } },
+  bank     = { frames = { "BankFrame" }, steps = { bank = true } },
+  mail     = { frames = { "MailFrame" }, steps = { collect = true } },
+}
+local venue -- the kind opened last and still open, or nil
+
+-- A venue's window (whichever kind this client has), when it's open.
+local function VenueWindow(kind)
+  for _, name in ipairs(VENUES[kind] and VENUES[kind].frames or {}) do
+    local frame = _G[name]
     if frame and frame.IsShown and frame:IsShown() then return frame end
   end
 end
 
+-- Where the window goes: beside the vendor, trainer, bank, mailbox or auction house you have
+-- open; else beside the profession window, as tall as it is; else the right of the screen.
 local function Place()
-  local host = Host()
-  -- Opened by the auction house: beside it.
-  if window.byAuction and AuctionWindow() then host = AuctionWindow() end
+  local host = (venue and VenueWindow(venue)) or Host()
   window:ClearAllPoints()
   if host and host.IsShown and host:IsShown() then
     local gap = HostOverhang(host) + 2
@@ -1832,7 +1873,12 @@ local lastOpen -- the profession the profession window was last seen showing
 local function OnHostHidden()
   dismissed = false
   lastOpen = nil
-  HideQuietly()
+  -- A plan you opened yourself stays until you close it; it only moves.
+  if window and window:IsShown() and not window.auto then
+    Place()
+  else
+    HideQuietly()
+  end
 end
 -- A "Plan" button on the profession window itself, top right, level with the skill bar, to
 -- show or hide the plan. It's built on the game's own small button and drawn above the
@@ -1915,13 +1961,14 @@ local function HookHost()
   end
 end
 
--- Shows the window. `auto` means the profession window brought it up, so it leaves with it.
-local function Show(auto)
+-- Shows the window. `auto` means a game window brought it up (the profession window, or with
+-- `byVenue` a vendor, trainer, bank, mailbox or the auction house), so it leaves with it.
+local function Show(auto, byVenue)
   if not Plan() then return false end
   HookHost()
   Build()
   window.auto = auto and true or nil
-  if not auto then window.byAuction = nil end
+  window.byVenue = (auto and byVenue) and true or nil
   Place()
   window:Show()
   -- Each time it comes up, the goals are brought up to date with what you have now.
@@ -2019,21 +2066,41 @@ function ns.PlanUpdated(profession, rebuilt)
   Check()
 end
 
--- At the auction house: the plan you last looked at comes up beside it, so the materials and
--- the shopping list are at hand, and goes away with it.
-local function OnAuctionOpen()
-  -- Only once you've looked at a plan on this character.
-  local c = ns.Char()
-  if not (c and c.planShown) or not Plan() or (window and window:IsShown()) then return end
-  Build()
-  window.byAuction = true
-  Show(true)
+-- At a vendor, trainer, bank, mailbox or the auction house: the plan you last looked at comes
+-- up beside that window when a step still to do is for that kind of place (the auction house:
+-- always), and goes away with it. A plan that's already up moves beside the window and stays.
+local function VenueWanted(kind)
+  local kinds = VENUES[kind].steps
+  if not kinds then return true end
+  local v = View()
+  for _, step in ipairs(v and v.steps or {}) do
+    if not step.done and kinds[step.k] then return true end
+  end
+  return false
 end
 
-local function OnAuctionClosed()
-  if window and window.byAuction then
-    window.byAuction = nil
-    if window:IsShown() and window.auto then HideQuietly() end
+local function OnVenueOpen(kind)
+  venue = kind
+  -- Only once you've looked at a plan on this character.
+  local c = ns.Char()
+  if not (c and c.planShown) or not Plan() then return end
+  if window and window:IsShown() then
+    Place()
+  elseif VenueWanted(kind) then
+    Show(true, true)
+  end
+end
+
+local function OnVenueClosed(kind)
+  if venue ~= kind then return end
+  venue = nil
+  if not (window and window:IsShown()) then return end
+  local host = Host()
+  if window.auto and window.byVenue and not (host and host.IsShown and host:IsShown()) then
+    HideQuietly()
+  else
+    window.byVenue = nil
+    Place()
   end
 end
 
@@ -2081,8 +2148,13 @@ ns.PlanQueueFollow = QueueFollow
 for _, event in ipairs({ "PLAYERBANKSLOTS_CHANGED", "BANKFRAME_OPENED", "BANKFRAME_CLOSED" }) do
   ns.On(event, function() ForgetViews() if Plan() then ns.Later("planCheck", 1, Check) end end)
 end
-ns.On("AUCTION_HOUSE_SHOW", function() C_Timer.After(0.3, function() ns.Run("planAuction", OnAuctionOpen) end) end)
-ns.On("AUCTION_HOUSE_CLOSED", function() ns.Run("planAuction", OnAuctionClosed) end)
+-- The game's window shows a moment after its event, so the plan waits before going beside it.
+for kind, events in pairs({ auction = { "AUCTION_HOUSE_SHOW", "AUCTION_HOUSE_CLOSED" },
+  merchant = { "MERCHANT_SHOW", "MERCHANT_CLOSED" }, trainer = { "TRAINER_SHOW", "TRAINER_CLOSED" },
+  bank = { "BANKFRAME_OPENED", "BANKFRAME_CLOSED" }, mail = { "MAIL_SHOW", "MAIL_CLOSED" } }) do
+  ns.On(events[1], function() C_Timer.After(0.3, function() ns.Run("planVenue", OnVenueOpen, kind) end) end)
+  ns.On(events[2], function() ns.Run("planVenue", OnVenueClosed, kind) end)
+end
 for _, event in ipairs({ "TRADE_SKILL_SHOW", "TRADE_SKILL_DATA_SOURCE_CHANGED", "TRADE_SKILL_LIST_UPDATE",
   "TRADE_SKILL_DETAILS_UPDATE" }) do
   ns.On(event, QueueFollow)

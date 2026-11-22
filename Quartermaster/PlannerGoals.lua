@@ -129,6 +129,8 @@ local function delivery(plan, key, market)
     -- Known from what's recorded: done once you hold this many. Later stages can't be known
     -- ahead (materials get used up in between), so the window counts from when the step comes up.
     if first then step.target = ((owned[row.item] or {}).total or 0) + row.n end
+    -- So a later purchase at the same vendor can be folded into this trip (G.FoldBuys).
+    step.at, step.unit = at(row), row.n > 0 and row.total / row.n or 0
     return put(step, place(row))
   end
 
@@ -721,6 +723,7 @@ local function tripSteps(plan, key, first)
         sub = (row.who or "a vendor") .. inZone(row.zone) .. ", " .. (row.guess and "about " or "") .. Money(row.total)
           .. (row.guess and " (estimate)" or "") }
       if first then step.target = ((owned[row.item] or {}).total or 0) + row.n end
+      step.at, step.unit = (row.who or "a vendor") .. inZone(row.zone), row.n > 0 and row.total / row.n or 0
       steps[#steps + 1] = put(step, place(row))
     end
   end
@@ -1482,6 +1485,77 @@ function G.Catalog(key, profession)
 end
 
 ----------------------------------------------------------------------
+-- One trip per vendor
+----------------------------------------------------------------------
+
+-- A goal's steps are the skill plan's (lead), then its own (tail). A vendor purchase among its
+-- own is moved up to the first trip the skill plan makes to that vendor: the same item joins
+-- that step ("Buy 8 Fine Thread", not 6 now and 2 later), another item goes right after it.
+-- Nothing moves past a step that's already done. Returns the two lists as the window should show
+-- them; `cache` (kept by the caller, per goal) holds the joined steps so their progress stays.
+function G.FoldBuys(lead, tail, cache)
+  local function vendorBuy(step)
+    return step.k == "buy" and step.item and step.at and step.unit and not step.done
+  end
+  local tripAt, sameItem = {}, {}
+  for i, step in ipairs(lead) do
+    if vendorBuy(step) then
+      if not tripAt[step.at] then tripAt[step.at] = i end
+      local key = step.at .. "|" .. tostring(step.item)
+      if not sameItem[key] then sameItem[key] = i end
+    end
+  end
+  if not next(tripAt) then return lead, tail end
+  local joined, after, rest, moved = {}, {}, {}, false
+  for _, step in ipairs(tail) do
+    local key = vendorBuy(step) and (step.at .. "|" .. tostring(step.item))
+    if key and sameItem[key] then
+      local i = sameItem[key]
+      joined[i] = joined[i] or {}
+      table.insert(joined[i], step)
+      moved = true
+    elseif key and tripAt[step.at] then
+      local i = tripAt[step.at]
+      after[i] = after[i] or {}
+      table.insert(after[i], step)
+      moved = true
+    else
+      rest[#rest + 1] = step
+    end
+  end
+  if not moved then return lead, tail end
+  local out = {}
+  for i, step in ipairs(lead) do
+    local extra = joined[i]
+    if extra then
+      local key = step.at .. "|" .. tostring(step.item)
+      local seen = cache[key]
+      local n, gold = step.n or 0, (step.n or 0) * step.unit
+      for _, more in ipairs(extra) do
+        n = n + (more.n or 0)
+        gold = gold + (more.n or 0) * more.unit
+      end
+      if not (seen and seen.base == step and seen.n == n) then
+        local both = {}
+        for k, v in pairs(step) do both[k] = v end
+        both.n = n
+        if step.target then both.target = step.target + (n - (step.n or 0)) end
+        local guess = step.guess or extra[1].guess
+        both.title = ("Buy %d %s"):format(n, P.ItemName(step.item))
+        both.sub = step.at .. ", " .. (guess and "about " or "") .. Money(gold) .. (guess and " (estimate)" or "")
+        seen = { base = step, n = n, step = both }
+        cache[key] = seen
+      end
+      out[#out + 1] = seen.step
+    else
+      out[#out + 1] = step
+    end
+    for _, more in ipairs(after[i] or {}) do out[#out + 1] = more end
+  end
+  return out, rest
+end
+
+----------------------------------------------------------------------
 -- One goal's plan
 ----------------------------------------------------------------------
 
@@ -1628,11 +1702,10 @@ local function tail(plan, skillPlan, e, first, carry)
           sub = tostring(v.name) .. inZone(npc.zone and (npc.subzone or npc.zone)) .. ", "
             .. (v.guess and "about " or "") .. Money(n * unit) .. (v.guess and " (estimate)" or "") }
         if first and not earn and not rep and not carry then step.target = ((owned[item] or {}).total or 0) + n end
-        if carry then
-          -- So the same purchase for several goals can be folded into one step.
-          step.unit, step.guess = unit, v.guess
-          step.at = tostring(v.name) .. inZone(npc.zone and (npc.subzone or npc.zone))
-        end
+        -- So the same purchase can be folded into one step: with an earlier trip to the same
+        -- vendor (G.FoldBuys), or across several goals.
+        step.unit, step.guess = unit, v.guess
+        step.at = tostring(v.name) .. inZone(npc.zone and (npc.subzone or npc.zone))
         steps[#steps + 1] = put(step, place({ map = npc.map, x = npc.x, y = npc.y, who = v.name }))
       end
     elseif op[1] == "use" then

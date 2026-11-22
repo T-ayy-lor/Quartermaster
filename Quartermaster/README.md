@@ -30,6 +30,9 @@ Download `Quartermaster-<version>.zip` from the
 
 `/qm` or the minimap button opens and closes the window. **Refresh** works the plan out again.
 
+Item tooltips also say how many you have on each of your characters (bags, bank, mail) that
+could mail it to you: the same ruleset and faction. Banks and mail count from your last visit.
+
 ## Good to know
 
 - Prices at a vendor you haven't opened are estimates, marked "about". A trainer's fee isn't
