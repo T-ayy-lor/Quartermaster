@@ -727,16 +727,18 @@ local function favorSteps(plan, key, first)
     steps[#steps + 1] = { k = "make", spell = m.spell, n = m.n, icon = m.item,
       title = ("Make %d %s"):format(m.n, m.name), sub = "From " .. table.concat(m.from, ", ") }
   end
+  -- One step for each kind of crate and what it's filled with, then the trip to hand them in
+  -- (where you last earned Favor from an NPC, recorded when it happens).
+  for _, e in ipairs(plan.crates) do
+    local short = (e.name:gsub("Waylaid Crate: ", ""))
+    steps[#steps + 1] = { k = "fill", item = e.fill.item, icon = e.item, n = e.n * e.fill.n, cur = FAVOR, favor = plan.need,
+      title = ("Fill %d %s crate%s"):format(e.n, short, plural(e.n)),
+      sub = ("With %d %s each%s"):format(e.fill.n, e.fill.name, e.n > 1 and (" (%d in all)"):format(e.n * e.fill.n) or "") }
+  end
   if #plan.crates > 0 then
-    local fills = {}
-    for _, e in ipairs(plan.crates) do
-      fills[#fills + 1] = ("%d x %s with %d %s"):format(e.n, (e.name:gsub("Waylaid Crate: ", "")), e.fill.n, e.fill.name)
-    end
-    -- Handed in where you last earned Favor from an NPC (recorded when it happens).
     steps[#steps + 1] = { k = "currency", cur = FAVOR, n = plan.need, icon = plan.crates[1].item, near = "crates",
-      title = ("Fill and hand in %d crate%s"):format(plan.crateCount, plural(plan.crateCount)),
-      sub = ("Until you have %d Merchant's Favor (5 a crate, sometimes double). %s")
-        :format(plan.need, table.concat(fills, "; ")) }
+      title = ("Hand in %d crate%s"):format(plan.crateCount, plural(plan.crateCount)),
+      sub = ("Until you have %d Merchant's Favor (5 a crate, sometimes double)"):format(plan.need) }
   end
   return steps
 end

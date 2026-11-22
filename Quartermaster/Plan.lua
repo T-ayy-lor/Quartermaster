@@ -174,6 +174,29 @@ BankSteps = function(plan, v)
     if step then out[#out + 1] = step end
   end
   if next(kept) then plan.bankSteps[goal] = kept end
+  -- The auction house stop, after the bank: everything the plan buys there, in one visit (the
+  -- Shopping list). Kept per goal like the bank steps, so it stays ticked once it's bought.
+  plan.auctionSteps = type(plan.auctionSteps) == "table" and plan.auctionSteps or {}
+  local stop = plan.auctionSteps[goal]
+  if not stop and HasAuctionator() and GetItemCountFn then
+    local items, names = {}, {}
+    for _, mat in ipairs(v.mats or {}) do
+      if mat.where == "auction house" and mat.item then
+        local have = Try(GetItemCountFn, mat.item, true) or 0
+        if (mat.need or 0) > have then
+          items[#items + 1] = { item = mat.item, want = mat.need }
+          names[#names + 1] = (mat.need - have) .. " " .. tostring(mat.name or "")
+        end
+      end
+    end
+    if #items > 0 then
+      stop = { k = "auction", items = items, icon = items[1].item, near = "auctioneer",
+        title = "Buy " .. #items .. (#items == 1 and " material" or " materials") .. " at the auction house",
+        sub = table.concat(names, ", ") }
+      plan.auctionSteps[goal] = stop
+    end
+  end
+  if stop then out[#out + 1] = stop end
   for _, step in ipairs(v.steps or {}) do out[#out + 1] = step end
   return out
 end
@@ -323,6 +346,13 @@ local function Progress(step)
     return info and info.quantity or nil, step.n
   elseif k == "bank" then
     return Count(step.item, false), step.want or step.n
+  elseif k == "auction" then
+    -- How many of its materials you now hold enough of.
+    local have = 0
+    for _, it in ipairs(step.items or {}) do
+      if Count(it.item, true) >= (it.want or 0) then have = have + 1 end
+    end
+    return have, #(step.items or {})
   elseif k == "make" then
     return step.made or 0, step.n or 1
   elseif k == "craft" then
@@ -336,9 +366,16 @@ local function IsDone(v, i, step)
     -- In your bags, or nothing of it left in the bank to take.
     local bags, total = Count(step.item, false), Count(step.item, true)
     return bags >= (step.want or step.n or 0) or total <= bags
-  elseif k == "buy" or k == "collect" or k == "make" or k == "craft" or k == "currency" then
+  elseif k == "buy" or k == "collect" or k == "make" or k == "craft" or k == "currency" or k == "auction" then
     local have, need = Progress(step)
     return have ~= nil and need ~= nil and have >= need
+  elseif k == "fill" then
+    -- Filled once that much of the material has gone since the step came up, or (in case the
+    -- game doesn't work that way) once the Favor it was for is there.
+    if step.base and step.item and step.n and Count(step.item, true) <= step.base - step.n then return true end
+    local info = step.cur and C_CurrencyInfo and C_CurrencyInfo.GetCurrencyInfo
+      and Try(C_CurrencyInfo.GetCurrencyInfo, step.cur)
+    return info ~= nil and step.favor ~= nil and (info.quantity or 0) >= step.favor
   elseif k == "learn" then
     return step.spell ~= nil and Try(IsPlayerSpell, step.spell) and true or false
   elseif k == "rank" then
@@ -364,6 +401,15 @@ local function CheckSteps(v)
     local step = v.steps[i]
     if step.k ~= "buy" and step.k ~= "collect" and step.k ~= "learn" then break end
     if (step.k == "buy" or step.k == "collect") and not step.done and not step.target and not step.base and step.item then
+      step.base = Count(step.item, true)
+      changed = true
+    end
+  end
+  -- Crate fills count what's used from when they come up; fills in a row start together.
+  for i = first or (#v.steps + 1), #v.steps do
+    local step = v.steps[i]
+    if step.k ~= "fill" then break end
+    if not step.done and not step.base and step.item then
       step.base = Count(step.item, true)
       changed = true
     end
@@ -1252,6 +1298,15 @@ local function RowClick(self)
   local plan, k = v.plan, step.k
   if (k == "make" or k == "craft") and step.spell then
     CraftStep(plan, step)
+  elseif k == "auction" then
+    -- The auction house stop: with it open, the Shopping list (made and searched); else the way there.
+    local open = (AuctionHouseFrame and AuctionHouseFrame.IsShown and AuctionHouseFrame:IsShown())
+      or (AuctionFrame and AuctionFrame.IsShown and AuctionFrame:IsShown())
+    if open then
+      ns.PlanShoppingList()
+    elseif not PointTo(step) then
+      ns.Print("open the auction house and click this again for the shopping list.")
+    end
   elseif k == "buy" or k == nil then
     -- A buying step, or a material: the auction house if it's open, else the way there.
     if AuctionSearch(plan, step.item) then return end
