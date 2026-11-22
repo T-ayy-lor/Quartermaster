@@ -1,0 +1,24 @@
+## Interface: 16001
+## Title: Quartermaster
+## Notes: A profession companion. Works out the cheapest way to any profession goal (a skill level, a recipe, a gear upgrade) from your bags, bank, vendors, trainers and auction prices, and shows the steps beside your profession window. /qm lists the commands.
+## Version: 0.10.0-beta
+## Category: Professions
+## IconTexture: Interface\Icons\INV_Scroll_03
+## SavedVariables: QuartermasterDB
+## Dependencies: Auctionator, Questie
+## OptionalDeps: TomTom
+## X-Credits: Recipe data from LibProfessionDB by Pimptasty (MIT license).
+
+Core.lua
+Recipes.lua
+Items.lua
+Character.lua
+Inventory.lua
+Professions.lua
+Npc.lua
+Planner.lua
+PlannerGoals.lua
+PlannerJobs.lua
+Plan.lua
+UI.lua
+Slash.lua

@@ -1,0 +1,5 @@
+<Bindings>
+	<Binding name="QUARTERMASTER_PLAN" category="Quartermaster">
+		Quartermaster_Plan()
+	</Binding>
+</Bindings>

@@ -1,0 +1,438 @@
+-- The planner, part 3: running it in the game.
+--
+-- Keeps this character's goals for each profession (in memory: they're worked out again from
+-- what's recorded, never saved), and works plans out in the background, a few milliseconds a
+-- frame, so the game never stutters:
+--   Planner.Plans()                 every profession's goals, by profession name
+--   Planner.Want(profession)        make sure its goals, and the plan of the goal that's picked,
+--                                   are worked out and up to date
+--   Planner.Rebuild(profession)     work them out again from scratch
+-- A profession's goals are worked out again when the plan window is shown or a goal is picked
+-- and something they depend on has changed since (bags, bank, gold, skill, recipes, vendors,
+-- trainers, auction prices). While you're working through a plan it's left alone, so its steps
+-- tick off instead of shifting under you.
+-- What's saved is only what you chose: QuartermasterDB.chars[key].planPrefs[profession] =
+-- { selected = goal id, showWaypoints = true }.
+
+local _, ns = ...
+
+local P, G = ns.P, ns.Goals
+local Planner = {}
+ns.Planner = Planner
+
+local plans = {}   -- profession -> its goals (see Plan.lua for the layout)
+local version = 1  -- goes up whenever something plans depend on changes
+local queue, running, ticker = {}, nil, nil
+
+local BUDGET_MS = 5 -- how long planning may take out of one frame
+local clock = debugprofilestop or function() return os.clock() * 1000 end
+local sliceStart = 0
+
+function P.Yield()
+  if running and running.co and coroutine.running() == running.co and clock() - sliceStart > BUDGET_MS then
+    coroutine.yield()
+  end
+end
+
+-- Gold, currencies and item names are asked from the game for the character you're on.
+local recordedGold, recordedCurrency = P.Gold, P.Currency
+function P.Gold(key)
+  if key == ns.PlayerKey() and GetMoney then
+    local money = ns.Try(GetMoney)
+    if type(money) == "number" then return money end
+  end
+  return recordedGold(key)
+end
+function P.Currency(key, id)
+  local n, name = recordedCurrency(key, id)
+  if key == ns.PlayerKey() and C_CurrencyInfo and C_CurrencyInfo.GetCurrencyInfo then
+    local info = ns.Try(C_CurrencyInfo.GetCurrencyInfo, id)
+    if info and type(info.quantity) == "number" then return info.quantity, info.name or name end
+  end
+  return n, name
+end
+-- An item the recorder hasn't got to yet (it works through thousands in the background) is
+-- asked from the game: its slot and kind are known at once, its name, quality, level and
+-- vendor value as soon as the game has loaded it. So gear is filed under its slot ("Chest",
+-- "Gloves") from the first look, never under "Other".
+local recordedItem = P.Item
+local liveItems = {}
+function P.Item(item)
+  local e = recordedItem(item)
+  if e.name or type(item) ~= "number" then return e end
+  local live = liveItems[item]
+  if live then return live end
+  live = {}
+  local instant = (C_Item and C_Item.GetItemInfoInstant) or GetItemInfoInstant
+  if instant then
+    local _, _, _, loc, _, classID, subID = ns.Try(instant, item)
+    if type(loc) == "string" and loc ~= "" then live.loc, live.classID, live.subID = loc, classID, subID end
+  end
+  local full = (C_Item and C_Item.GetItemInfo) or GetItemInfo
+  local name, _, quality, _, reqLevel, _, _, _, _, _, sell, _, _, bind
+  if full then name, _, quality, _, reqLevel, _, _, _, _, _, sell, _, _, bind = ns.Try(full, item) end
+  if name then
+    live.name, live.q = name, quality
+    live.req = (reqLevel and reqLevel > 0) and reqLevel or nil
+    live.sell = (sell and sell > 0) and sell or nil
+    live.bind = (bind and bind > 0) and bind or nil
+    -- Complete: kept for the session. (Until then it's asked again each time.)
+    liveItems[item] = live
+  elseif C_Item and C_Item.RequestLoadItemDataByID then
+    pcall(C_Item.RequestLoadItemDataByID, item)
+  end
+  return live
+end
+
+function P.Knows(key, spell)
+  return key == ns.PlayerKey() and IsPlayerSpell and ns.Try(IsPlayerSpell, spell) and true or false
+end
+function P.LiveName(item)
+  local name = C_Item and C_Item.GetItemNameByID and ns.Try(C_Item.GetItemNameByID, item)
+  return type(name) == "string" and name ~= "" and name or nil
+end
+
+----------------------------------------------------------------------
+-- Places: where you are, how far things are, and where unrecorded NPCs stand
+----------------------------------------------------------------------
+
+function P.Here()
+  local pos = ns.Position()
+  if pos.map and pos.x then return { map = pos.map, x = pos.x, y = pos.y } end
+  return nil
+end
+
+-- A place in the world's own coordinates (yards), which compare across neighboring maps.
+local function World(place)
+  if not (C_Map and C_Map.GetWorldPosFromMapPos and CreateVector2D and place.map and place.x) then return nil end
+  local ok, continent, pos = pcall(C_Map.GetWorldPosFromMapPos, place.map, CreateVector2D(place.x / 100, place.y / 100))
+  if ok and continent and pos and pos.GetXY then
+    local x, y = pos:GetXY()
+    if type(x) == "number" and type(y) == "number" then return continent, x, y end
+  end
+  return nil
+end
+
+local mapDistance = P.Distance
+function P.Distance(a, b)
+  local ca, ax, ay = World(a)
+  local cb, bx, by = World(b)
+  if ca and cb then
+    -- Another continent is a boat or a portal away: no telling how far.
+    if ca ~= cb then return nil end
+    return math.sqrt((ax - bx) ^ 2 + (ay - by) ^ 2)
+  end
+  return mapDistance(a, b)
+end
+
+-- Where an NPC you haven't met stands, from Questie's data when Questie is installed:
+-- { { map, x, y, name } }, or nil. Nothing here is needed for the addon to work.
+local placeCache = {}
+function P.NpcPlaces(id)
+  if not (type(QuestieLoader) == "table" and QuestieLoader.ImportModule) then return nil end
+  if placeCache[id] ~= nil then return placeCache[id] or nil end
+  local found = false
+  do
+    local ok, out = pcall(function()
+      local db = QuestieLoader:ImportModule("QuestieDB")
+      local zones = QuestieLoader:ImportModule("ZoneDB")
+      local spawns = db.QueryNPCSingle(id, "spawns")
+      if type(spawns) ~= "table" then return nil end
+      local name = db.QueryNPCSingle(id, "name")
+      local list = {}
+      for area, points in pairs(spawns) do
+        local map = zones:GetUiMapIdByAreaId(area)
+        if type(map) == "number" and type(points) == "table" then
+          -- An NPC that walks about has many points; the first few are enough to find it.
+          for i = 1, math.min(#points, 3) do
+            local pt = points[i]
+            if type(pt) == "table" and type(pt[1]) == "number" and type(pt[2]) == "number" and pt[1] >= 0 then
+              list[#list + 1] = { map = map, x = pt[1], y = pt[2], name = type(name) == "string" and name or nil }
+            end
+          end
+        end
+      end
+      return #list > 0 and list or nil
+    end)
+    if ok and out then found = out end
+  end
+  placeCache[id] = found
+  return found or nil
+end
+
+-- A vendor that sells an item, from Questie's data, for an item no vendor you've opened sells:
+-- the nearest one your faction can use, with an estimated price (four times what a vendor pays
+-- for the item, which is how the game prices most vendor goods).
+local sellers = {} -- item -> { { npc = id, name = "..." } } or false
+function P.VendorGuess(key, item)
+  if key ~= ns.PlayerKey() then return nil end
+  -- Without Questie there's nothing to ask (and nothing is remembered, in case it loads later).
+  if not (type(QuestieLoader) == "table" and QuestieLoader.ImportModule) then return nil end
+  local list = sellers[item]
+  if list == nil then
+    list = false
+    do
+      local ok, out = pcall(function()
+        local db = QuestieLoader:ImportModule("QuestieDB")
+        local ids = db.QueryItemSingle(item, "vendors")
+        if type(ids) ~= "table" then return nil end
+        local mine = (P.Info(key).faction or ""):sub(1, 1) -- "A" or "H"
+        local found = {}
+        for i = 1, math.min(#ids, 40) do
+          local friendly = db.QueryNPCSingle(ids[i], "friendlyToFaction")
+          if type(friendly) ~= "string" or mine == "" or friendly:find(mine, 1, true) then
+            found[#found + 1] = ids[i]
+          end
+        end
+        return #found > 0 and found or nil
+      end)
+      if ok and out then list = out end
+    end
+    sellers[item] = list
+  end
+  if not list then return nil end
+  local sell = P.Item(item).sell
+  if not sell and C_Item and C_Item.GetItemInfo then sell = select(11, C_Item.GetItemInfo(item)) end
+  if type(sell) ~= "number" or sell <= 0 then return nil end
+  local here, best = P.Here(), nil
+  for _, id in ipairs(list) do
+    for _, spot in ipairs(P.NpcPlaces(id) or {}) do
+      if not best or P.Better(spot, 0, best, 0, here) then best = spot end
+    end
+  end
+  if not best then return nil end
+  local info = C_Map and C_Map.GetMapInfo and ns.Try(C_Map.GetMapInfo, best.map)
+  return { unit = sell * 4, name = best.name or "a vendor", map = best.map, x = best.x, y = best.y,
+    zone = info and info.name or nil }
+end
+
+----------------------------------------------------------------------
+-- What you chose, kept between sessions
+----------------------------------------------------------------------
+
+local function Prefs(profession)
+  local c = ns.Char()
+  if not c then return {} end
+  if type(c.planPrefs) ~= "table" then c.planPrefs = {} end
+  if type(c.planPrefs[profession]) ~= "table" then c.planPrefs[profession] = {} end
+  return c.planPrefs[profession]
+end
+Planner.Prefs = Prefs
+
+----------------------------------------------------------------------
+-- Every profession's goals
+----------------------------------------------------------------------
+
+-- Goals that haven't been worked out yet: an empty list that says so.
+local function Stub(profession)
+  return { profession = profession, title = profession .. " goals", targets = {}, groups = {}, levels = {},
+    stub = true, summary = "Working out your " .. profession .. " goals...",
+    showWaypoints = Prefs(profession).showWaypoints }
+end
+
+-- Every profession this character has, each with its goals (a stub until they're worked out).
+function Planner.Plans()
+  local c = ns.Char()
+  local list = c and c.professions and c.professions.list
+  if type(list) == "table" then
+    for name in pairs(list) do
+      if not plans[name] then plans[name] = Stub(name) end
+    end
+    for name, plan in pairs(plans) do
+      if not list[name] and not plan.fixed then plans[name] = nil end
+    end
+  end
+  return plans
+end
+
+-- Puts ready-made goals in place, never to be worked out again (the tests use this).
+function Planner.Set(profession, plan)
+  plan.fixed = true
+  plan.profession = plan.profession or profession
+  local prefs = Prefs(profession)
+  plan.showWaypoints = prefs.showWaypoints
+  for _, t in ipairs(plan.targets or {}) do
+    if t.id == prefs.selected and not t.no then plan.selected = t.id end
+  end
+  plans[profession] = plan
+  if ns.PlanUpdated then ns.PlanUpdated(profession) end
+end
+
+function Planner.Version() return version end
+
+-- Something plans depend on changed.
+function Planner.Touch()
+  version = version + 1
+end
+
+----------------------------------------------------------------------
+-- Working plans out, a little each frame
+----------------------------------------------------------------------
+
+local Step
+
+local function Start()
+  if ticker or not C_Timer or not C_Timer.NewTicker then return end
+  ticker = C_Timer.NewTicker(0.01, function() Step() end)
+end
+
+local function Stop()
+  if ticker then
+    ticker:Cancel()
+    ticker = nil
+  end
+end
+
+function Step()
+  if not running then
+    running = table.remove(queue, 1)
+    if not running then
+      Stop()
+      return
+    end
+    running.co = coroutine.create(running.fn)
+  end
+  sliceStart = clock()
+  local ok, err = coroutine.resume(running.co)
+  if not ok then
+    local job = running
+    running = nil
+    ns.Error("planner " .. tostring(job.key), tostring(err) .. "\n" .. (debug and debug.traceback and debug.traceback(job.co) or ""))
+    if job.failed then job.failed() end
+  elseif coroutine.status(running.co) == "dead" then
+    -- Finished: only now is the window told, so it sees that nothing is being worked out.
+    local job = running
+    running = nil
+    if job.done then ns.Run("planner", job.done) end
+  end
+  if not running and #queue == 0 then Stop() end
+end
+
+local function Queued(key)
+  if running and running.key == key then return true end
+  for _, job in ipairs(queue) do
+    if job.key == key then return true end
+  end
+  return false
+end
+
+local function Enqueue(key, fn, done, failed)
+  if Queued(key) then return end
+  queue[#queue + 1] = { key = key, fn = fn, done = done, failed = failed }
+  Start()
+end
+
+-- Whether anything is being worked out for a profession right now.
+function Planner.Busy(profession)
+  return Queued("build:" .. profession) or Queued("goal:" .. profession)
+end
+
+-- Brings what's recorded up to date before planning from it (it's normally a few seconds
+-- behind the game).
+local function RecordNow()
+  for _, name in ipairs({ "SaveSkills", "SaveKnownRecipes", "SaveInfo", "SaveBags", "SaveCurrencies" }) do
+    if ns[name] then ns.Run("planner", ns[name]) end
+  end
+end
+
+-- Works a profession's goals out from scratch, then the plan of the goal that's picked.
+local function Build(profession)
+  local key = ns.PlayerKey()
+  RecordNow()
+  local built = version
+  local plan = G.Catalog(key, profession)
+  if not plan then
+    plans[profession] = nil
+    return
+  end
+  plan.version = built
+  local prefs = Prefs(profession)
+  plan.showWaypoints = prefs.showWaypoints
+  -- The goal you picked last time, if it's still there to pick.
+  for _, t in ipairs(plan.targets) do
+    if t.id == prefs.selected and not t.no then plan.selected = t.id end
+  end
+  if plan.selected then G.PlanGoal(plan, plan.selected) end
+  plans[profession] = plan
+end
+
+function Planner.Rebuild(profession)
+  local plan = plans[profession]
+  if plan and plan.fixed then return end
+  local c = ns.Char()
+  if not (c and c.professions and c.professions.list and c.professions.list[profession]) then return end
+  local function updated()
+    -- True: the goal list itself is new, so an open dropdown showing the old one is closed.
+    if ns.PlanUpdated then ns.PlanUpdated(profession, true) end
+  end
+  Enqueue("build:" .. profession, function() Build(profession) end, updated, function()
+    -- It went wrong: say so in the window instead of "working it out" forever.
+    local now = plans[profession]
+    if now and now.stub then
+      now.failed = true
+      now.summary = "Something went wrong working out these goals. The error is saved for a bug report."
+    end
+    updated()
+  end)
+end
+
+-- Makes sure a profession's goals are worked out and up to date, and the picked goal planned.
+function Planner.Want(profession)
+  local plan = profession and plans[profession]
+  if not plan or plan.fixed then return end
+  if plan.stub or plan.version ~= version then
+    Planner.Rebuild(profession)
+    return
+  end
+  local id = plan.selected
+  if not id then return end
+  for _, t in ipairs(plan.targets) do
+    if t.id == id and not t.planned and not t.no and t.level then
+      if not Queued("build:" .. profession) then
+        Enqueue("goal:" .. profession, function()
+          -- The goal picked by the time this runs.
+          local now = plans[profession]
+          if now and now == plan and now.selected then G.PlanGoal(now, now.selected) end
+        end, function()
+          if ns.PlanUpdated then ns.PlanUpdated(profession) end
+        end, function()
+          -- It went wrong: the goal says so instead of "working it out" forever.
+          for _, goal in ipairs(plan.targets) do
+            if goal.id == plan.selected and not goal.planned then
+              goal.no = "Something went wrong working out this plan. The error is saved for a bug report."
+            end
+          end
+          if ns.PlanUpdated then ns.PlanUpdated(profession) end
+        end)
+      end
+      return
+    end
+  end
+end
+
+-- True when the goal showing is still being worked out.
+function Planner.Pending(plan)
+  if not plan or plan.fixed then return false end
+  if plan.stub then return not plan.failed end
+  for _, t in ipairs(plan.targets) do
+    if t.id == plan.selected then return not t.planned and not t.no and t.level ~= nil end
+  end
+  return false
+end
+
+----------------------------------------------------------------------
+-- When plans go out of date
+----------------------------------------------------------------------
+
+-- Every change to something recorded that plans are made from.
+local DEPENDS = { info = true, professions = true, bags = true, bank = true, accountBank = true, mail = true,
+  currencies = true, recipes = true, knownRecipes = true, vendors = true, trainers = true, gear = true }
+local markDirty = ns.MarkDirty
+function ns.MarkDirty(section)
+  if DEPENDS[section] then version = version + 1 end
+  return markDirty(section)
+end
+
+-- Auction prices can have changed after a visit (Auctionator scans there).
+ns.On("AUCTION_HOUSE_CLOSED", Planner.Touch)
+ns.On("PLAYER_MONEY", Planner.Touch)
