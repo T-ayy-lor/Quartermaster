@@ -472,7 +472,22 @@ function P.Market(key)
     if hit == nil then
       local unit, source
       local v = m.vendors[item]
-      if v and not v.guess then unit, source = v.unit, "vendor" end
+      if v and not v.guess then
+        unit, source = v.unit, "vendor"
+        -- An ordinary vendor good costs the same everywhere, so the price you've seen is used
+        -- with the nearest vendor that sells it, even one you haven't opened, when that one is
+        -- clearly closer.
+        local here = P.Here()
+        local near = here and v.stock == nil and P.VendorGuess(key, item) or nil
+        if near then
+          local toNear = P.Distance(here, near)
+          local toSeen = v.spot and v.spot.x and P.Distance(here, v.spot) or nil
+          if toNear and (not toSeen or toNear < toSeen * 0.8) then
+            v.name, v.npc = near.name, nil
+            v.spot = { map = near.map, x = near.x, y = near.y, zone = near.zone }
+          end
+        end
+      end
       local p = P.Price(item)
       if p and (not unit or p < unit) then unit, source = p, "ah" end
       if not unit then

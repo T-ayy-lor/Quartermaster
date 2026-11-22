@@ -163,7 +163,23 @@ end
 -- A vendor that sells an item, from Questie's data, for an item no vendor you've opened sells:
 -- the nearest one your faction can use, with an estimated price (four times what a vendor pays
 -- for the item, which is how the game prices most vendor goods).
-local sellers = {} -- item -> { { npc = id, name = "..." } } or false
+-- Only for ordinary vendor goods (thread, salt, vials, dyes: sold by trade suppliers everywhere,
+-- without limit). Things only a few vendors carry, or that players craft (Copper Modulators,
+-- Strange Dust), are sold one or two at a time: a plan can't count on buying dozens there.
+local COMMON_AT = 20 -- how many vendors must sell it for it to count as an ordinary vendor good
+local crafted     -- item -> true for everything a recipe makes
+local function Crafted(item)
+  if not crafted then
+    crafted = {}
+    for _, line in pairs(ns.recipeData or {}) do
+      for _, recipe in pairs(line.r or {}) do
+        if recipe.i then crafted[recipe.i] = true end
+      end
+    end
+  end
+  return crafted[item] or false
+end
+local sellers = {} -- item -> { npc ids } or false
 function P.VendorGuess(key, item)
   if key ~= ns.PlayerKey() then return nil end
   -- Without Questie there's nothing to ask (and nothing is remembered, in case it loads later).
@@ -176,9 +192,11 @@ function P.VendorGuess(key, item)
         local db = QuestieLoader:ImportModule("QuestieDB")
         local ids = db.QueryItemSingle(item, "vendors")
         if type(ids) ~= "table" then return nil end
+        if #ids < COMMON_AT or Crafted(item) then return nil end
         local mine = (P.Info(key).faction or ""):sub(1, 1) -- "A" or "H"
         local found = {}
-        for i = 1, math.min(#ids, 40) do
+        -- Every one of them, so the nearest (a capital city's trade supplier, say) is among them.
+        for i = 1, #ids do
           local friendly = db.QueryNPCSingle(ids[i], "friendlyToFaction")
           if type(friendly) ~= "string" or mine == "" or friendly:find(mine, 1, true) then
             found[#found + 1] = ids[i]
