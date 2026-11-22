@@ -160,6 +160,52 @@ function P.NpcPlaces(id)
   return found or nil
 end
 
+-- Every Craftsman's Writ, from Questie's quest data (read once, a little at a time): the writ's
+-- item, the item it asks for, what it pays with the commerce factions, and who takes it.
+-- How many of the item a writ asks for isn't in that data: one is assumed.
+local writList
+local COMMERCE_IDS = { [2586] = true, [2587] = true }
+function P.Writs()
+  if writList then return writList end
+  if not (type(QuestieLoader) == "table" and QuestieLoader.ImportModule) then return nil end
+  local ok, db = pcall(QuestieLoader.ImportModule, QuestieLoader, "QuestieDB")
+  -- Questie may still be starting up: ask again next time.
+  if not ok or type(db) ~= "table" or type(db.QuestPointers) ~= "table" or not db.QueryQuestSingle then return nil end
+  local quests = {}
+  for quest in pairs(db.QuestPointers) do quests[#quests + 1] = quest end
+  table.sort(quests)
+  local function read(quest)
+    local title = db.QueryQuestSingle(quest, "name")
+    if type(title) ~= "string" or not title:find("^Craftsman's Writ: ") then return nil end
+    local rep = 0
+    local rewards = db.QueryQuestSingle(quest, "reputationReward")
+    for _, r in ipairs(type(rewards) == "table" and rewards or {}) do
+      if type(r) == "table" and COMMERCE_IDS[r[1]] and type(r[2]) == "number" then rep = math.max(rep, r[2]) end
+    end
+    local starts = db.QueryQuestSingle(quest, "startedBy")
+    local writ = type(starts) == "table" and type(starts[3]) == "table" and starts[3][1] or nil
+    local objectives = db.QueryQuestSingle(quest, "objectives")
+    local items = {}
+    for _, o in ipairs(type(objectives) == "table" and type(objectives[3]) == "table" and objectives[3] or {}) do
+      if type(o) == "table" and type(o[1]) == "number" and o[1] ~= writ then items[#items + 1] = { o[1], 1 } end
+    end
+    local ends = db.QueryQuestSingle(quest, "finishedBy")
+    local npc = type(ends) == "table" and type(ends[1]) == "table" and ends[1][1] or nil
+    if rep > 0 and type(writ) == "number" and #items > 0 then
+      return { quest = quest, writ = writ, title = title, items = items, rep = rep, npc = npc }
+    end
+  end
+  local list = {}
+  for i, quest in ipairs(quests) do
+    local fine, writ = pcall(read, quest)
+    if fine and writ then list[#list + 1] = writ end
+    -- (Not inside the pcall: the game's Lua can't pause there.)
+    if i % 50 == 0 then P.Yield() end
+  end
+  writList = list
+  return list
+end
+
 -- A vendor that sells an item, from Questie's data, for an item no vendor you've opened sells:
 -- the nearest one your faction can use, with an estimated price (four times what a vendor pays
 -- for the item, which is how the game prices most vendor goods).
@@ -348,7 +394,7 @@ end
 -- Brings what's recorded up to date before planning from it (it's normally a few seconds
 -- behind the game).
 local function RecordNow()
-  for _, name in ipairs({ "SaveSkills", "SaveKnownRecipes", "SaveInfo", "SaveBags", "SaveCurrencies" }) do
+  for _, name in ipairs({ "SaveSkills", "SaveKnownRecipes", "SaveInfo", "SaveBags", "SaveCurrencies", "SaveReputations" }) do
     if ns[name] then ns.Run("planner", ns[name]) end
   end
 end

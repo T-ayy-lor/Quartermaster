@@ -127,7 +127,42 @@ local function SaveCurrencies()
   if #list > 0 then ns.Save("currencies", { list = list }) end
 end
 
-ns.SaveInfo, ns.SaveCurrencies = SaveInfo, SaveCurrencies
+-- Reputation with the factions Merchant's Favor vendors belong to (their patterns can ask for a
+-- standing). `earned` is the reputation in all: Neutral starts at 0, Friendly at 3000.
+local COMMERCE_FACTIONS = { 2586, 2587 }
+local function FactionNow(id)
+  local C = C_Reputation
+  local data = C and C.GetFactionDataByID and Try(C.GetFactionDataByID, id)
+  if type(data) == "table" and data.name then
+    return data.name, data.currentStanding, data.reaction
+  end
+  if GetFactionInfoByID then
+    local name, _, standing, _, _, value = Try(GetFactionInfoByID, id)
+    if name then return name, value, standing end
+  end
+end
+
+local function SaveReputations()
+  local list = {}
+  for _, id in ipairs(COMMERCE_FACTIONS) do
+    local name, earned, standing = FactionNow(id)
+    if type(name) == "string" and name ~= "" and type(earned) == "number" then
+      list[name] = { id = id, earned = earned, standing = standing }
+    end
+  end
+  -- An empty answer never replaces what's saved.
+  if next(list) then ns.Save("reputations", { list = list }) end
+end
+
+-- The reputation you've earned with a faction right now, by name, or nil.
+function ns.Reputation(faction)
+  for _, id in ipairs(COMMERCE_FACTIONS) do
+    local name, earned = FactionNow(id)
+    if name == faction and type(earned) == "number" then return earned end
+  end
+end
+
+ns.SaveInfo, ns.SaveCurrencies, ns.SaveReputations = SaveInfo, SaveCurrencies, SaveReputations
 
 -- Where Merchant's Favor is earned: when yours goes up while you're talking to an NPC, that's
 -- where crates are handed in. Its place is remembered, so plans can point there.
@@ -152,6 +187,8 @@ ns.On("PLAYER_ENTERING_WORLD", function()
   ns.Later("gear", 5, SaveGear)
   ns.Later("currencies", 6, SaveCurrencies)
 end)
+ns.On("PLAYER_ENTERING_WORLD", function() ns.Later("reputations", 6, SaveReputations) end)
+ns.On("UPDATE_FACTION", function() ns.Later("reputations", 3, SaveReputations) end)
 ns.On("PLAYER_LEVEL_UP", function() ns.Later("info", 2, SaveInfo) end)
 ns.On("PLAYER_MONEY", function() ns.Later("info", 2, SaveInfo) end)
 ns.On("SKILL_LINES_CHANGED", function() ns.Later("skills", 3, SaveProfessions) end)

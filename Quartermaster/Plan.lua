@@ -63,6 +63,7 @@ local KIND_COLOR = {
   learn = "|cff66bbff",                           -- a trip to a trainer
   make = GREEN, craft = GREEN,                    -- crafting
   currency = "|cffff8040",                        -- earning a currency
+  fill = "|cffff8040", writ = "|cffff8040", rep = "|cffff8040",   -- crates and writs
   sell = GOLD,                                    -- gold coming back
 }
 local QUESTION_MARK = 134400
@@ -344,6 +345,9 @@ local function Progress(step)
     local info = step.cur and C_CurrencyInfo and C_CurrencyInfo.GetCurrencyInfo
       and Try(C_CurrencyInfo.GetCurrencyInfo, step.cur)
     return info and info.quantity or nil, step.n
+  elseif k == "writ" or k == "rep" then
+    -- Reputation earned with the faction, against where the step should bring it.
+    return step.faction and ns.Reputation and ns.Reputation(step.faction) or nil, step.n
   elseif k == "bank" then
     return Count(step.item, false), step.want or step.n
   elseif k == "auction" then
@@ -366,7 +370,7 @@ local function IsDone(v, i, step)
     -- In your bags, or nothing of it left in the bank to take.
     local bags, total = Count(step.item, false), Count(step.item, true)
     return bags >= (step.want or step.n or 0) or total <= bags
-  elseif k == "buy" or k == "collect" or k == "make" or k == "craft" or k == "currency" or k == "auction" then
+  elseif k == "buy" or k == "collect" or k == "make" or k == "craft" or k == "currency" or k == "auction" or k == "writ" or k == "rep" then
     local have, need = Progress(step)
     return have ~= nil and need ~= nil and have >= need
   elseif k == "fill" then
@@ -1317,7 +1321,7 @@ local function RowClick(self)
         ns.Print("open the auction house and click this again to search for it.")
       end
     end
-  elseif (k == "learn" or k == "rank" or k == "sell" or k == "currency" or k == "collect" or k == "bank") and HasTomTom() then
+  elseif (k == "learn" or k == "rank" or k == "writ" or k == "sell" or k == "currency" or k == "collect" or k == "bank") and HasTomTom() then
     if not PointTo(step) then
       if step.near then
         ns.Print(step.near == "crates" and "where crates are handed in isn't recorded yet. It's remembered the first time you hand one in."
@@ -2072,7 +2076,7 @@ end
 
 for _, event in ipairs({ "BAG_UPDATE_DELAYED", "SKILL_LINES_CHANGED", "NEW_RECIPE_LEARNED",
   "TRADE_SKILL_LIST_UPDATE", "PLAYERBANKSLOTS_CHANGED", "MERCHANT_UPDATE", "PLAYER_MONEY",
-  "CURRENCY_DISPLAY_UPDATE" }) do
+  "CURRENCY_DISPLAY_UPDATE", "UPDATE_FACTION" }) do
   ns.On(event, function() if Plan() then ns.Later("planCheck", 1, Check) end end)
 end
 ns.On("UNIT_SPELLCAST_SUCCEEDED", OnCraft)

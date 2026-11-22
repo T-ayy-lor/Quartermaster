@@ -559,6 +559,64 @@ local function favorSimulation(key, inventory, market, cache)
   return sim
 end
 
+-- What a run of buying and making comes to, from the simulation's operations: what to buy
+-- (with where), what's used of what you own, what to make, and the gold.
+local function opRows(sim, allOps, market, warnings)
+  local buys, uses, makes, makeOrder = {}, {}, {}, {}
+  for _, op in ipairs(allOps) do
+    if op[1] == "buy" then
+      local k = op[2] .. ":" .. op[4]
+      buys[k] = buys[k] or { item = op[2], name = nameOf(op[2]), source = op[4], n = 0, unit = op[5] }
+      buys[k].n = buys[k].n + op[3]
+    elseif op[1] == "use" then
+      uses[op[2]] = (uses[op[2]] or 0) + op[3]
+    elseif op[1] == "make" then
+      if not makes[op[2]] then makeOrder[#makeOrder + 1] = op[2] end
+      makes[op[2]] = (makes[op[2]] or 0) + op[3]
+    end
+  end
+  local bySpell = {}
+  for _, r in ipairs(sim.recipes) do bySpell[r.spell] = r end
+  local buyRows, gold = {}, 0
+  for _, e in pairs(buys) do
+    local row = copy(e)
+    row.n = whole(e.n)
+    row.total = row.n * e.unit
+    buyRows[#buyRows + 1] = row
+    gold = gold + row.total
+  end
+  table.sort(buyRows, function(a, b)
+    if a.source ~= b.source then return a.source < b.source end
+    if a.name ~= b.name then return a.name < b.name end
+    return a.item < b.item
+  end)
+  for _, row in ipairs(buyRows) do
+    if row.source == "vendor" then
+      local v = market.vendors[row.item]
+      local npc = v.spot or P.Npc(v.npc)
+      row.who, row.map, row.x, row.y, row.zone = v.name, npc.map, npc.x, npc.y, npc.subzone or npc.zone
+      row.guess = v.guess
+    else
+      local listed = P.Listed(row.item)
+      if listed ~= nil and listed < row.n then
+        warnings[#warnings + 1] = ("Only %d %s were listed when last scanned, and this needs %d.")
+          :format(listed, row.name, row.n)
+      end
+    end
+  end
+  local useRows = {}
+  for item, n in pairs(uses) do useRows[#useRows + 1] = { item = item, name = nameOf(item), n = whole(n) } end
+  table.sort(useRows, function(a, b) return a.item < b.item end)
+  local makeRows = {}
+  for _, spell in ipairs(makeOrder) do
+    local r = bySpell[spell]
+    local from = {}
+    for _, reagent in ipairs(r.reagents) do from[#from + 1] = nameOf(reagent[1]) end
+    makeRows[#makeRows + 1] = { spell = spell, name = r.name, item = r.item, n = whole(makes[spell]), from = from }
+  end
+  return buyRows, useRows, makeRows, gold
+end
+
 -- The cheapest crates to reach `need` Merchant's Favor in total. Returns:
 --   need, have, crateCount, short (Favor still missing when crates run out)
 --   crates   { { item, name, n, fill = { item, name, n (per crate) } } }
@@ -629,48 +687,7 @@ function G.PlanFavor(key, need, inventory, market, cache)
     if a.name ~= b.name then return a.name < b.name end
     return a.seq < b.seq
   end)
-  local buys, uses, makes, makeOrder = {}, {}, {}, {}
-  for _, op in ipairs(allOps) do
-    if op[1] == "buy" then
-      local k = op[2] .. ":" .. op[4]
-      buys[k] = buys[k] or { item = op[2], name = nameOf(op[2]), source = op[4], n = 0, unit = op[5] }
-      buys[k].n = buys[k].n + op[3]
-    elseif op[1] == "use" then
-      uses[op[2]] = (uses[op[2]] or 0) + op[3]
-    elseif op[1] == "make" then
-      if not makes[op[2]] then makeOrder[#makeOrder + 1] = op[2] end
-      makes[op[2]] = (makes[op[2]] or 0) + op[3]
-    end
-  end
-  local bySpell = {}
-  for _, r in ipairs(sim.recipes) do bySpell[r.spell] = r end
-  local buyRows, gold = {}, 0
-  for _, e in pairs(buys) do
-    local row = copy(e)
-    row.n = whole(e.n)
-    row.total = row.n * e.unit
-    buyRows[#buyRows + 1] = row
-    gold = gold + row.total
-  end
-  table.sort(buyRows, function(a, b)
-    if a.source ~= b.source then return a.source < b.source end
-    if a.name ~= b.name then return a.name < b.name end
-    return a.item < b.item
-  end)
-  for _, row in ipairs(buyRows) do
-    if row.source == "vendor" then
-      local v = market.vendors[row.item]
-      local npc = v.spot or P.Npc(v.npc)
-      row.who, row.map, row.x, row.y, row.zone = v.name, npc.map, npc.x, npc.y, npc.subzone or npc.zone
-      row.guess = v.guess
-    else
-      local listed = P.Listed(row.item)
-      if listed ~= nil and listed < row.n then
-        warnings[#warnings + 1] = ("Only %d %s were listed when last scanned, and this needs %d.")
-          :format(listed, row.name, row.n)
-      end
-    end
-  end
+  local buyRows, useRows, makeRows, gold = opRows(sim, allOps, market, warnings)
   -- Crates you own that the plan leaves alone, and what filling one would cost: so it's clear
   -- they were looked at.
   local usedItems = {}
@@ -693,24 +710,14 @@ function G.PlanFavor(key, need, inventory, market, cache)
       end
     end
   end
-  local useRows = {}
-  for item, n in pairs(uses) do useRows[#useRows + 1] = { item = item, name = nameOf(item), n = whole(n) } end
-  table.sort(useRows, function(a, b) return a.item < b.item end)
-  local makeRows = {}
-  for _, spell in ipairs(makeOrder) do
-    local r = bySpell[spell]
-    local from = {}
-    for _, reagent in ipairs(r.reagents) do from[#from + 1] = nameOf(reagent[1]) end
-    makeRows[#makeRows + 1] = { spell = spell, name = r.name, item = r.item, n = whole(makes[spell]), from = from }
-  end
   return { need = need, have = have, crateCount = #picked, short = max(0, left - #picked * PER_CRATE),
     crates = crates, buys = buyRows, uses = useRows, makes = makeRows, gold = gold, warnings = warnings,
     inventory = inv, note = FAVOR_NOTE }
 end
 
--- The Favor plan as steps for the plan window, ending in one that ticks when the Favor is there.
--- (Auction house buys aren't steps: they're in the materials list.)
-local function favorSteps(plan, key, first)
+-- The vendor trips and the crafts of a Favor or reputation plan, as steps. (Auction house buys
+-- aren't steps: they're in the materials list.)
+local function tripSteps(plan, key, first)
   local owned = P.Owned(key)
   local steps = {}
   for _, row in ipairs(plan.buys) do
@@ -727,6 +734,11 @@ local function favorSteps(plan, key, first)
     steps[#steps + 1] = { k = "make", spell = m.spell, n = m.n, icon = m.item,
       title = ("Make %d %s"):format(m.n, m.name), sub = "From " .. table.concat(m.from, ", ") }
   end
+  return steps
+end
+
+local function favorSteps(plan, key, first)
+  local steps = tripSteps(plan, key, first)
   -- One step for each kind of crate and what it's filled with, then the trip to hand them in
   -- (where you last earned Favor from an NPC, recorded when it happens).
   for _, e in ipairs(plan.crates) do
@@ -741,6 +753,149 @@ local function favorSteps(plan, key, first)
       sub = ("Until you have %d Merchant's Favor (5 a crate, sometimes double)"):format(plan.need) }
   end
   return steps
+end
+
+----------------------------------------------------------------------
+-- Reputation a pattern's vendor asks for: the cheapest Craftsman's Writs to earn it
+----------------------------------------------------------------------
+
+-- Reputation, in all, where each standing starts.
+local STANDING_START = { Friendly = 3000, Honored = 9000, Revered = 21000, Exalted = 42000 }
+-- The faction that Merchant's Favor vendors belong to, by side.
+local COMMERCE = { Horde = "Durotar Supply and Logistics", Alliance = "Azeroth Commerce Authority" }
+local REP_NOTE = "Craftsman's Writs: each order is said to count once a day (players' reports, not the game's "
+  .. "data), and a writ may ask for more than one of its item. Read the writ before buying for it."
+
+-- The faction and standing a pattern's vendor asks for, or nil. ("Requires Honored with this
+-- faction." on a Merchant's Favor vendor means the side's commerce faction.)
+local function repNeeded(key, src)
+  local favor = false
+  for _, o in ipairs(list(src.others)) do
+    if o.currency == FAVOR then favor = true end
+  end
+  for _, line in ipairs(list(src.reqs)) do
+    local faction
+    local standing = line:match("^Requires (%a+) with this faction")
+    if standing then
+      faction = favor and COMMERCE[P.Info(key).faction or ""] or nil
+    else
+      faction, standing = line:match("^Requires (.+) %- (%a+)$")
+    end
+    if faction and STANDING_START[standing] then return faction, standing end
+  end
+end
+
+-- The higher of two standings (either may be nil).
+local function higher(a, b)
+  if not a or not b then return a or b end
+  return STANDING_START[a] >= STANDING_START[b] and a or b
+end
+
+-- The cheapest Craftsman's Writs to reach a standing with a faction: for each, the writ (owned,
+-- or bought) and the item it asks for (owned, bought or made), least gold per reputation first,
+-- each order once. Returns:
+--   faction, standing, need (reputation where the standing starts), have (nil when it isn't
+--   recorded), left, short (still missing after these writs)
+--   writs    { { quest, writ, title, items, rep, npc, upTo (reputation after it), map, x, y, who } }
+--   buys, uses, makes, gold, warnings, inventory   as G.PlanFavor
+function G.PlanRep(key, faction, standing, inventory, market, cache)
+  local need = STANDING_START[standing]
+  local have = P.Reputation(key, faction)
+  local out = { faction = faction, standing = standing, need = need, have = have, left = 0, short = 0, writs = {},
+    buys = {}, uses = {}, makes = {}, gold = 0, warnings = {}, inventory = inventory, note = REP_NOTE }
+  if have == nil then return out end
+  local left = max(0, need - have)
+  out.left, out.short = left, left
+  local all = left > 0 and P.Writs(key) or nil
+  if not all then return out end
+  local sim = favorSimulation(key, inventory, market, cache)
+  local inv = copy(sim.inv)
+  -- Only writs you hold or that have a price can be delivered.
+  local writs = {}
+  for _, w in ipairs(all) do
+    if (w.rep or 0) > 0 and ((inv[w.writ] or 0) >= 1 or market.buy(w.writ)) then writs[#writs + 1] = w end
+  end
+  local picked, allOps, used, gained = {}, {}, {}, 0
+  while gained < left do
+    local best
+    for _, w in ipairs(writs) do
+      if not used[w.quest] then
+        local trial, ops = copy(inv), {}
+        local g = sim:acquire(w.writ, 1, trial, ops)
+        for _, it in ipairs(w.items) do
+          local more = g and sim:acquire(it[1], it[2], trial, ops)
+          g = more and (g + more) or nil
+        end
+        if g and (not best or g / w.rep < best.per - 1e-9) then
+          best = { per = g / w.rep, inv = trial, ops = ops, writ = w }
+        end
+      end
+      P.Yield()
+    end
+    if not best then break end
+    inv = best.inv
+    used[best.writ.quest] = true
+    for _, op in ipairs(best.ops) do allOps[#allOps + 1] = op end
+    gained = gained + best.writ.rep
+    local w = copy(best.writ)
+    w.upTo = min(need, have + gained)
+    -- Where it's handed in: the nearest place the other addon has for who takes it.
+    local here, spot = P.Here(), nil
+    for _, place in ipairs(w.npc and P.NpcPlaces(w.npc) or {}) do
+      if not spot or P.Better(place, 0, spot, 0, here) then spot = place end
+    end
+    if spot then w.map, w.x, w.y, w.who = spot.map, spot.x, spot.y, spot.name end
+    picked[#picked + 1] = w
+  end
+  sim.inv = inv
+  out.writs, out.short, out.inventory = picked, max(0, left - gained), inv
+  out.buys, out.uses, out.makes, out.gold = opRows(sim, allOps, market, out.warnings)
+  return out
+end
+
+-- The reputation plan as steps: the trips and crafts, one delivery for each writ, and when the
+-- writs don't get all the way, a step for the rest.
+local function repSteps(rep, key, first)
+  local steps = tripSteps(rep, key, first)
+  for _, w in ipairs(rep.writs) do
+    local wants = {}
+    for _, it in ipairs(w.items) do wants[#wants + 1] = it[2] .. " " .. nameOf(it[1]) end
+    steps[#steps + 1] = put({ k = "writ", quest = w.quest, icon = w.writ, faction = rep.faction, n = w.upTo,
+      title = "Deliver " .. table.concat(wants, ", "),
+      sub = ("%s, +%d reputation"):format(w.title, w.rep) }, place(w))
+  end
+  if rep.have == nil then
+    steps[#steps + 1] = { k = "rep", faction = rep.faction, n = rep.need,
+      title = ("Reach %s with %s"):format(rep.standing, rep.faction),
+      sub = "Your standing with them isn't recorded yet" }
+  elseif rep.short > 0 then
+    steps[#steps + 1] = { k = "rep", faction = rep.faction, n = rep.need,
+      title = ("Reach %s with %s"):format(rep.standing, rep.faction),
+      sub = (#rep.writs > 0 and "%d more reputation after these writs. More orders count tomorrow"
+        or "%d more reputation, from Craftsman's Writs. None you hold or with an auction price was found")
+        :format(rep.short) }
+  end
+  return steps
+end
+
+-- What a reputation plan adds to a goal's summary line and its notes.
+local function repWords(rep)
+  local words
+  if rep.have == nil then
+    words = (" Also needs %s with %s."):format(rep.standing, rep.faction)
+  elseif #rep.writs > 0 then
+    words = (" That includes about %s for %d writ%s toward %s with %s (%d reputation to go)."):format(
+      Money(rep.gold), #rep.writs, plural(#rep.writs), rep.standing, rep.faction, rep.left)
+  else
+    words = (" Also needs %s with %s (%d reputation to go)."):format(rep.standing, rep.faction, rep.left)
+  end
+  local notes = {}
+  if rep.have ~= nil and rep.short > 0 then
+    notes[#notes + 1] = ("%d reputation with %s is still missing after the writs found."):format(rep.short, rep.faction)
+  end
+  for _, w in ipairs(rep.warnings) do notes[#notes + 1] = w end
+  notes[#notes + 1] = rep.note
+  return words, notes
 end
 
 ----------------------------------------------------------------------
@@ -1406,7 +1561,7 @@ local function tail(plan, skillPlan, e, first, carry)
   local key, market, src = plan.key, plan.market, e.src
   local run = skillPlan.final
   local ahPlace = P.AuctionHouse(key)
-  local steps, gold, others, earn = {}, 0, {}, nil
+  local steps, gold, others, earn, rep = {}, 0, {}, nil, nil
   local inventory = (carry and carry.inv) or (run and run.inv) or {}
   local already = {}
   for _, l in ipairs(skillPlan.learns) do already[l.spell] = true end
@@ -1423,15 +1578,27 @@ local function tail(plan, skillPlan, e, first, carry)
       gold = gold + (src.gold or 0)
       others = list(src.others)
       put(step, place(src))
+      -- A vendor that asks for a standing: the cheapest writs to earn the reputation come first.
+      local faction, standing = repNeeded(key, src)
+      if faction and not carry then
+        rep = G.PlanRep(key, faction, standing, copy(inventory), market, plan.cache)
+        if rep.have ~= nil and rep.left <= 0 then
+          rep = nil
+        else
+          for _, s in ipairs(repSteps(rep, key, first)) do steps[#steps + 1] = s end
+          gold = gold + rep.gold
+          inventory = rep.inventory
+        end
+      end
       -- A pattern paid for in Merchant's Favor: the cheapest crates to earn what's missing come
-      -- first, from what's left after the skill plan.
+      -- next, from what's left after the skill plan.
       local wanted = 0
       for _, o in ipairs(others) do
         if o.currency == FAVOR then wanted = wanted + (o.n or 0) end
       end
       if not carry and wanted > P.Currency(key, FAVOR) then
         earn = G.PlanFavor(key, wanted, copy(inventory), market, plan.cache)
-        for _, s in ipairs(favorSteps(earn, key, first)) do steps[#steps + 1] = s end
+        for _, s in ipairs(favorSteps(earn, key, first and not rep)) do steps[#steps + 1] = s end
         gold = gold + earn.gold
         inventory = earn.inventory
       end
@@ -1473,7 +1640,7 @@ local function tail(plan, skillPlan, e, first, carry)
         local step = { k = "buy", item = item, icon = item, n = n, title = ("Buy %d %s"):format(n, P.ItemName(item)),
           sub = tostring(v.name) .. inZone(npc.zone and (npc.subzone or npc.zone)) .. ", "
             .. (v.guess and "about " or "") .. Money(n * unit) .. (v.guess and " (estimate)" or "") }
-        if first and not earn and not carry then step.target = ((owned[item] or {}).total or 0) + n end
+        if first and not earn and not rep and not carry then step.target = ((owned[item] or {}).total or 0) + n end
         if carry then
           -- So the same purchase for several goals can be folded into one step.
           step.unit, step.guess = unit, v.guess
@@ -1513,10 +1680,12 @@ local function tail(plan, skillPlan, e, first, carry)
     sim.learned[e.spell] = true
     carry.inv, carry.learned = sim.inv, sim.learned
   end
-  -- The crates and what goes in them count as materials too.
-  if earn then
-    for _, rows in ipairs({ earn.buys, earn.uses }) do
-      for _, row in ipairs(rows) do need[row.item] = (need[row.item] or 0) + row.n end
+  -- The crates and what goes in them count as materials too, and so do writs and their items.
+  for _, part in ipairs({ earn or false, rep or false }) do
+    if part then
+      for _, rows in ipairs({ part.buys, part.uses }) do
+        for _, row in ipairs(rows) do need[row.item] = (need[row.item] or 0) + row.n end
+      end
     end
   end
   -- A pattern bought at the auction house goes on the shopping list too.
@@ -1535,7 +1704,7 @@ local function tail(plan, skillPlan, e, first, carry)
   for _, m in ipairs(mats) do
     if m.item == pattern then m.name = P.Item(m.item).name or ("Pattern: " .. e.name) end
   end
-  return steps, mats, gold, others, earn
+  return steps, mats, gold, others, earn, rep
 end
 
 -- Works out the plan for one goal and puts it on the goal: its level (the skill to reach first,
@@ -1599,9 +1768,15 @@ function G.PlanMulti(plan)
   -- Merchant's Favor: what all the patterns cost together, earned once.
   local steps, gold, earn, favorName = {}, 0, nil, "Merchant's Favor"
   local wanted = 0
+  local repFaction, repStanding, rep
   for _, t in ipairs(goals) do
     local e = plan.entries and plan.entries[t.id]
     if e and not e.known and not already[e.spell] and e.src.how == "vendor" and e.src.confirmed then
+      -- The highest standing any of the patterns' vendors asks for.
+      local faction, standing = repNeeded(key, e.src)
+      if faction and (not repFaction or faction == repFaction) then
+        repFaction, repStanding = faction, higher(repStanding, standing)
+      end
       for _, o in ipairs(list(e.src.others)) do
         if o.currency == FAVOR then
           wanted = wanted + (o.n or 0)
@@ -1615,18 +1790,33 @@ function G.PlanMulti(plan)
     local old = need[entry.item]
     if old then old.need = old.need + entry.need else need[entry.item] = entry end
   end
-  if wanted > P.Currency(key, FAVOR) then
-    earn = G.PlanFavor(key, wanted, copy(carry.inv), market, plan.cache)
-    for _, st in ipairs(favorSteps(earn, key, first)) do steps[#steps + 1] = st end
-    gold = gold + earn.gold
-    carry.inv = earn.inventory
-    for _, rows in ipairs({ earn.buys, earn.uses }) do
+  local function addRows(part)
+    for _, rows in ipairs({ part.buys, part.uses }) do
       for _, row in ipairs(rows) do
         local entry = matEntry(key, row.item, row.n, market, true)
         entry.name = nameOf(row.item)
         addNeed(entry)
       end
     end
+  end
+  -- Reputation for all of them, earned once, before the Favor.
+  if repFaction then
+    rep = G.PlanRep(key, repFaction, repStanding, copy(carry.inv), market, plan.cache)
+    if rep.have ~= nil and rep.left <= 0 then
+      rep = nil
+    else
+      for _, st in ipairs(repSteps(rep, key, first)) do steps[#steps + 1] = st end
+      gold = gold + rep.gold
+      carry.inv = rep.inventory
+      addRows(rep)
+    end
+  end
+  if wanted > P.Currency(key, FAVOR) then
+    earn = G.PlanFavor(key, wanted, copy(carry.inv), market, plan.cache)
+    for _, st in ipairs(favorSteps(earn, key, first and not rep)) do steps[#steps + 1] = st end
+    gold = gold + earn.gold
+    carry.inv = earn.inventory
+    addRows(earn)
   end
 
   -- Each recipe in turn.
@@ -1667,7 +1857,7 @@ function G.PlanMulti(plan)
     local st = buys[k]
     st.title = ("Buy %d %s"):format(st.n, P.ItemName(st.item))
     st.sub = st.at .. ", " .. (st.guess and "about " or "") .. Money(st.n * st.unit) .. (st.guess and " (estimate)" or "")
-    if first and not earn then st.target = ((owned[st.item] or {}).total or 0) + st.n end
+    if first and not earn and not rep then st.target = ((owned[st.item] or {}).total or 0) + st.n end
     st.unit, st.at, st.guess = nil, nil, nil
     steps[#steps + 1] = st
   end
@@ -1689,7 +1879,17 @@ function G.PlanMulti(plan)
     summary = summary .. (" That includes about %s for %d crate%s, to earn the %d %s these cost.")
       :format(Money(earn.gold), earn.crateCount, plural(earn.crateCount), earn.need, favorName)
   end
-  local rest = gold - (earn and earn.gold or 0)
+  local repNotes
+  if rep then
+    local words
+    words, repNotes = repWords(rep)
+    summary = summary .. words
+    if #rep.writs > 0 then
+      costs.parts[#costs.parts + 1] = { ("%d writ%s toward %s with %s"):format(#rep.writs, plural(#rep.writs),
+        rep.standing, rep.faction), floor(rep.gold + 0.5) }
+    end
+  end
+  local rest = gold - (earn and earn.gold or 0) - (rep and rep.gold or 0)
   if rest > 0.5 then
     costs.parts[#costs.parts + 1] = { ("Learning and materials for %d item%s"):format(recipes, plural(recipes)),
       floor(rest + 0.5) }
@@ -1707,6 +1907,7 @@ function G.PlanMulti(plan)
     for _, w in ipairs(earn.warnings) do costs.notes[#costs.notes + 1] = w end
     costs.notes[#costs.notes + 1] = earn.note
   end
+  for _, note in ipairs(repNotes or {}) do costs.notes[#costs.notes + 1] = note end
   m.tail, m.mats, m.summary, m.costs, m.planned = steps, (#mats > 0 and mats or nil), summary, costs, true
   return m
 end
@@ -1734,7 +1935,7 @@ function G.PlanGoal(plan, id)
   else
     local e = plan.entries[id]
     local src = e.src
-    local steps, mats, extraGold, others, earn = tail(plan, skillPlan, e, #level.steps == 0)
+    local steps, mats, extraGold, others, earn, rep = tail(plan, skillPlan, e, #level.steps == 0)
     local total = level.cost + extraGold
     local summary = ("Cost %s. You have %s."):format(Money(total), Money(goldHave))
     local costs = costsOf(level, skill, t.level, profession)
@@ -1757,8 +1958,18 @@ function G.PlanGoal(plan, id)
           have and (" (you have %d)"):format(have) or "")
       end
     end
+    local repNotes
+    if rep then
+      local words
+      words, repNotes = repWords(rep)
+      summary = summary .. words
+    end
     if unsure then summary = summary .. " Where to learn it isn't confirmed." end
-    local learnGold = extraGold - (earn and earn.gold or 0)
+    local learnGold = extraGold - (earn and earn.gold or 0) - (rep and rep.gold or 0)
+    if rep and #rep.writs > 0 then
+      costs.parts[#costs.parts + 1] = { ("%d writ%s toward %s with %s"):format(#rep.writs, plural(#rep.writs),
+        rep.standing, rep.faction), floor(rep.gold + 0.5) }
+    end
     if earn and earn.crateCount > 0 then
       costs.parts[#costs.parts + 1] = { ("%d crate%s for %d Merchant's Favor"):format(earn.crateCount,
         plural(earn.crateCount), earn.need), floor(earn.gold + 0.5) }
@@ -1784,6 +1995,7 @@ function G.PlanGoal(plan, id)
       for _, w in ipairs(earn.warnings) do costs.notes[#costs.notes + 1] = w end
       costs.notes[#costs.notes + 1] = earn.note
     end
+    for _, note in ipairs(repNotes or {}) do costs.notes[#costs.notes + 1] = note end
     t.tail, t.mats, t.summary, t.costs = steps, (#mats > 0 and mats or nil), summary, costs
   end
   t.planned = true

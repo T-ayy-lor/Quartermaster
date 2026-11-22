@@ -221,6 +221,19 @@ function P.VendorGuess() return nil end
 -- { map, x, y, name }, or nil. (PlannerJobs.lua asks Questie when it's installed.)
 function P.NpcPlaces() return nil end
 
+-- The reputation a character has earned with a faction (by name), in all: Neutral starts at 0,
+-- Friendly at 3000. Nil when it isn't recorded.
+function P.Reputation(key, faction)
+  local c = P.Char(key)
+  local r = c and c.reputations and c.reputations.list and c.reputations.list[faction]
+  return type(r) == "table" and tonumber(r.earned) or nil
+end
+
+-- Every Craftsman's Writ there is, from another addon's data (Questie, in PlannerJobs.lua), in
+-- order of quest: { { quest, writ (the writ's item), title, items = { { item, n } }, rep, npc
+-- (who takes it) } }, or nil when there's nothing to ask.
+function P.Writs() return nil end
+
 -- Skill where each rank tops out. The next rank can be trained 25 points before that in Classic;
 -- Forever hasn't confirmed it.
 P.RANKS = { { 75, "Apprentice" }, { 150, "Journeyman" }, { 225, "Expert" }, { 300, "Artisan" } }
@@ -486,7 +499,26 @@ function P.Recipes(key, profession)
   local c = P.Char(key)
   if not c then return nil end
   local seen = c.recipes and c.recipes[profession]
-  if seen and type(seen.recipes) == "table" and next(seen.recipes) then return seen end
+  if seen and type(seen.recipes) == "table" and next(seen.recipes) then
+    -- The list is as the profession window last showed it. A recipe learned since (a pattern
+    -- bought at a vendor) is known now, whatever the list says.
+    local learned
+    for spell, r in pairs(seen.recipes) do
+      if type(spell) == "number" and type(r) == "table" and not r.known and P.Knows(key, spell) then
+        learned = learned or {}
+        learned[spell] = true
+      end
+    end
+    if not learned then return seen end
+    local out = copy(seen)
+    out.recipes = copy(seen.recipes)
+    for spell in pairs(learned) do
+      local r = copy(seen.recipes[spell])
+      r.known = true
+      out.recipes[spell] = r
+    end
+    return out
+  end
   local db = P.RecipeDB(key, profession)
   if not next(db) then return nil end
   local known = c.knownRecipes and c.knownRecipes.list and c.knownRecipes.list[profession]
