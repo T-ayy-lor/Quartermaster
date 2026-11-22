@@ -13,7 +13,7 @@
 --   levels  = { [skill] = { steps, mats } }     the steps to reach each skill level
 --   items   = { [itemID] = { name, each, where } }   every material's name and cheapest price
 --   a target's req = { { itemID, count }, ... } is what one craft of it takes
---   selected = the goal showing now;  showWaypoints = the window's tick box
+--   selected = the goal showing now
 -- The steps shown are the selected goal's: its level's steps, then its own. A goal's plan is
 -- worked out when it's picked (planned = true once it is). Each step is
 --   { k = kind, title = "...", sub = "...", icon = itemID, done = true|nil, ... }
@@ -42,7 +42,8 @@
 --   a buying step    searches the auction house for the item when it's open; otherwise points
 --                    the way (a TomTom arrow) when the step has a place
 --   a learning step  points the way
--- Pointing the way, and the waypoint tick box, are there only when TomTom is installed.
+-- Pointing the way is there only when TomTom is installed, and only on a click: the plan
+-- never sets an arrow by itself.
 --   /qm   show or hide the window
 
 local _, ns = ...
@@ -52,7 +53,6 @@ local GetItemCount = (C_Item and C_Item.GetItemCount) or GetItemCount
 local GetItemIcon = (C_Item and C_Item.GetItemIconByID) or GetItemIcon
 
 local window, rows = nil, {}
-local wayStep, arrivedAt = nil, nil
 local dismissed = false -- you closed it while the profession window was open
 
 local GREY, WHITE, GREEN, RED, GOLD = "|cff808080", "|cffffffff", "|cff40ff40", "|cffff4040", "|cffffd100"
@@ -322,6 +322,18 @@ local function HaveText(item, need)
   return text, total
 end
 
+-- How many of a recipe the materials you hold right now would make (bags and bank together).
+-- Nil when the recipe's materials aren't known.
+local function CanMake(t)
+  if type(t.req) ~= "table" or #t.req == 0 then return nil end
+  local most
+  for _, pair in ipairs(t.req) do
+    local n = math.floor(Count(pair[1], true) / math.max(1, pair[2] or 1))
+    if not most or n < most then most = n end
+  end
+  return most
+end
+
 -- The first step that isn't done yet.
 local function CurrentStep(v)
   for i, step in ipairs(v.steps) do
@@ -393,7 +405,7 @@ local function IsDone(v, i, step)
   return false
 end
 
-local Refresh, UpdateWaypoint
+local Refresh
 
 -- Ticks off every step that's now finished. A step you ticked or unticked by hand is left alone.
 local function CheckSteps(v)
@@ -442,7 +454,6 @@ local function Check()
     if Valid(plan) then CheckSteps(ViewOf(plan)) end
   end
   Refresh()
-  UpdateWaypoint()
 end
 ns.PlanCheck = Check
 
@@ -453,7 +464,6 @@ function ns.PlanToggleStep(i)
   step.done = (not step.done) and true or nil
   step.byHand = step.done and true or false
   Refresh()
-  UpdateWaypoint()
 end
 
 -- A craft of a recipe counts toward the first unfinished "make" step for it.
@@ -489,7 +499,7 @@ function ns.PlanStatus()
 end
 
 ----------------------------------------------------------------------
--- The optional waypoint: one arrow, for the step you're on, and only if that step has a place
+-- Pointing the way: an arrow to a step's place, set only when you click the step
 ----------------------------------------------------------------------
 
 local function HasTomTom()
@@ -497,12 +507,27 @@ local function HasTomTom()
 end
 
 -- Arrows are TomTom's: without TomTom installed there are none, and nothing in the window
--- offers them (no tick box, no "click to point the way").
+-- offers them (no "click to point the way").
 -- Each is a route: one stop, or several when flying is quicker (the nearest flight
 -- master first, then the place itself). TomTom shows one stop at a time; when you reach it, the
--- arrow moves on to the next. There are two: "step" follows the step you're on (when waypoints
--- are ticked), "click" is the one a click on a row sets.
+-- arrow moves on to the next. There is one, "click": the one a click on a row sets.
 local arrows = {} -- name -> { stops, leg, uid }
+
+-- A click takes TomTom's arrow. What the arrow pointed at before (a waypoint of yours, or
+-- another addon's) gets it back when the route ends.
+local arrowTarget, prior
+
+function ns.PlanArrowTarget(uid)
+  arrowTarget = uid
+end
+
+local function GiveBack()
+  local was = prior
+  prior = nil
+  if not (type(was) == "table" and HasTomTom() and TomTom.SetCrazyArrow and TomTom.IsValidWaypoint) then return end
+  local ok, valid = pcall(TomTom.IsValidWaypoint, TomTom, was)
+  if ok and valid then pcall(TomTom.SetCrazyArrow, TomTom, was, was.arrivaldistance, was.title) end
+end
 
 local function ShowStop(arrow)
   local stop = arrow.stops[arrow.leg]
@@ -542,6 +567,12 @@ local function RouteText(stops)
 end
 
 local function StartArrow(name, stops)
+  -- Remember whose arrow this takes (a second click keeps what the first one remembered).
+  if type(arrowTarget) ~= "table" then
+    prior = nil
+  elseif arrowTarget.from ~= "Quartermaster" then
+    prior = arrowTarget
+  end
   ClearArrow(name)
   local arrow = { stops = stops, leg = 1 }
   arrows[name] = arrow
@@ -549,31 +580,8 @@ local function StartArrow(name, stops)
   return arrow
 end
 
-local function ClearWaypoint()
-  ClearArrow("step")
-  wayStep = nil
-end
-
-function UpdateWaypoint()
-  local v = View()
-  local i, step
-  if v and v.plan.showWaypoints and HasTomTom() then i, step = CurrentStep(v) end
-  -- A step with nowhere to go (crafting) shows no arrow.
-  local map, x, y, name
-  if step then map, x, y, name = PlaceOf(step) end
-  if not map then
-    ClearWaypoint()
-    return
-  end
-  if wayStep == i or arrivedAt == i then return end
-  ClearWaypoint()
-  arrivedAt = nil
-  wayStep = i
-  StartArrow("step", RouteTo(map, x, y, name or step.title or step.text))
-end
-
 -- TomTom took an arrow away (you arrived, or removed it). On a route with more stops the arrow
--- moves on to the next; at the end it isn't put straight back.
+-- moves on to the next; at the end, the arrow goes back to what it pointed at before.
 function ns.PlanWaypointRemoved(uid)
   if uid == nil then return end
   for name, arrow in pairs(arrows) do
@@ -589,22 +597,11 @@ function ns.PlanWaypointRemoved(uid)
         end
       else
         arrows[name] = nil
-        if name == "step" then arrivedAt = wayStep end
+        GiveBack()
       end
       return
     end
   end
-end
-
-function ns.PlanSetWaypoints(on)
-  local plan = Plan()
-  if not plan then return end
-  plan.showWaypoints = on and true or nil
-  if plan.profession then ns.Planner.Prefs(plan.profession).showWaypoints = plan.showWaypoints end
-  arrivedAt = nil
-  ns.MarkDirty("plan")
-  UpdateWaypoint()
-  Refresh()
 end
 
 ----------------------------------------------------------------------
@@ -617,8 +614,6 @@ local function SetActive(name)
   if not (plans and name and Valid(plans[name])) then return false end
   if active ~= name then
     active = name
-    arrivedAt = nil
-    ClearWaypoint()
   end
   local c = ns.Char()
   if c.planShown ~= name then
@@ -683,13 +678,18 @@ end
 
 -- One line of the dropdown: icon, the skill needed, the name in its item quality color and, for
 -- a recipe you don't know, its cost in whatever it's paid in (green if you can pay it now, red
--- if not).
-local function GoalLabel(t, plan)
+-- if not). In a list, a recipe you know also says how many you could make right now.
+local function GoalLabel(t, plan, inList)
   if t.kind == "skill" or t.kind == "multi" then return GOLD .. tostring(t.name) .. "|r" end
+  local ready = ""
+  if inList and (t.known or t.made) then
+    local n = CanMake(t)
+    if n and n > 0 then ready = "   " .. GREEN .. "can make " .. n .. "|r" end
+  end
   local have = plan and plan.profession and ns.profSkill and ns.profSkill[plan.profession]
   -- Already crafted: the whole line is grey.
   if t.made then
-    return IconText(t.icon) .. GREY .. (t.skill and (t.skill .. "  ") or "") .. tostring(t.name) .. "   made|r"
+    return IconText(t.icon) .. GREY .. (t.skill and (t.skill .. "  ") or "") .. tostring(t.name) .. "   made|r" .. ready
   end
   local name = QualityColor(t) .. tostring(t.name) .. "|r"
   local skill = ""
@@ -698,7 +698,7 @@ local function GoalLabel(t, plan)
     if t.known then color = DIFF_COLOR[t.diff] or WHITE end
     skill = color .. t.skill .. "|r  "
   end
-  if t.known then return IconText(t.icon) .. skill .. name end
+  if t.known then return IconText(t.icon) .. skill .. name .. ready end
   local cost = ""
   if t.cost and t.cost ~= "" then
     local afford = CanAfford(t)
@@ -757,7 +757,6 @@ local function SetPicked(plan, ids)
     plan.picked, plan.selected = plan.multi.ids, "multi"
     prefs.picked, prefs.selected = plan.multi.ids, "multi"
   end
-  arrivedAt = nil
   ns.MarkDirty("plan")
   ForgetViews()
   -- The plan is worked out now, from what you have at this moment.
@@ -806,7 +805,6 @@ function ns.PlanSelect(id)
     plan.selected = id
     plan.multi, plan.picked = nil, nil
     prefs.selected, prefs.picked = id, nil
-    arrivedAt = nil
     ns.MarkDirty("plan")
   end
   -- Its plan is worked out now, from what you have at this moment.
@@ -852,7 +850,7 @@ local function AddMaterials(tooltip, t, plan)
     tooltip:AddDoubleLine("Still to buy", GOLD .. "about " .. Money(total) .. "|r" .. (unpriced and " +" or ""),
       0.7, 0.7, 0.7, 1, 1, 1)
   else
-    tooltip:AddLine("You have everything for one.", 0.25, 1, 0.25)
+    tooltip:AddLine("You have enough to make " .. (CanMake(t) or 1) .. " (bags and bank).", 0.25, 1, 0.25)
   end
   tooltip:AddLine(" ")
 end
@@ -916,7 +914,7 @@ local function GoalMenu(_, root, index)
     end)
   end
   local function add(parent, t)
-    local radio = parent:CreateRadio(GoalLabel(t, plan),
+    local radio = parent:CreateRadio(GoalLabel(t, plan, true),
       function() return picked[index] == t.id end,
       function()
         ns.PlanPick(index, t.id)
@@ -1558,7 +1556,7 @@ local function Build()
 
   frame.summary = frame:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
   -- The text lines up with the text inside the dropdowns above it.
-  -- One line, centered in its row between the goal dropdown and the waypoint box.
+  -- One line, in its own row under the goal dropdown.
   frame.summary:SetPoint("TOPLEFT", HEADER_LEFT + 8, -32 - 2 * HEADER_ROW - 6)
   frame.summary:SetPoint("RIGHT", frame, "RIGHT", -HEADER_RIGHT - 4, 0)
   frame.summary:SetJustifyH("LEFT")
@@ -1572,27 +1570,8 @@ local function Build()
   hover:SetScript("OnLeave", function() GameTooltip:Hide() end)
   frame.costHover = hover
 
-  local ok, way = pcall(CreateFrame, "CheckButton", nil, frame, "UICheckButtonTemplate")
-  if ok and way then
-    way:SetSize(24, 24)
-    -- The tick box's art has a few pixels of padding; this puts its box under the dropdowns' edge.
-    way:SetPoint("TOPLEFT", HEADER_LEFT + 3, -32 - 3 * HEADER_ROW)
-    way.label = frame:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
-    way.label:SetPoint("LEFT", way, "RIGHT", 2, 0)
-    way:SetScript("OnClick", function(self) ns.PlanSetWaypoints(self:GetChecked()) end)
-    way:SetScript("OnEnter", function(self)
-      GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-      GameTooltip:AddLine("Waypoints")
-      GameTooltip:AddLine("Points an arrow at the step you're on, when that step is somewhere to go "
-        .. "(a vendor, a trainer, a bank). Steps like crafting show no arrow.", 1, 1, 1, true)
-      GameTooltip:Show()
-    end)
-    way:SetScript("OnLeave", function() GameTooltip:Hide() end)
-    frame.way = way
-  end
-
   local inset = CreateFrame("Frame", nil, frame, "InsetFrameTemplate")
-  inset:SetPoint("TOPLEFT", 10, -32 - 4 * HEADER_ROW)
+  inset:SetPoint("TOPLEFT", 10, -32 - 3 * HEADER_ROW)
   inset:SetPoint("BOTTOMRIGHT", -10, 34)
   frame.inset = inset
 
@@ -1744,20 +1723,10 @@ function Refresh()
     if portrait then portrait:SetTexture(icon) end
   end
   window.summary:SetText(CostText(v) or v.summary or "")
-  if window.way then
-    -- The waypoint tick box is there only with TomTom installed; without it, the list takes its row.
-    local tomtom = HasTomTom()
-    window.way:SetShown(tomtom)
-    window.way.label:SetShown(tomtom)
-    window.way:SetChecked(plan.showWaypoints and true or false)
-    window.way.label:SetText("Show TomTom waypoints")
-    window.way:ClearAllPoints()
-    window.way:SetPoint("TOPLEFT", HEADER_LEFT + 3, -32 - (goalRows + 2) * HEADER_ROW)
-    if window.inset then
-      window.inset:ClearAllPoints()
-      window.inset:SetPoint("TOPLEFT", 10, -32 - (goalRows + (tomtom and 3 or 2)) * HEADER_ROW)
-      window.inset:SetPoint("BOTTOMRIGHT", -10, 34)
-    end
+  if window.inset then
+    window.inset:ClearAllPoints()
+    window.inset:SetPoint("TOPLEFT", 10, -32 - (goalRows + 2) * HEADER_ROW)
+    window.inset:SetPoint("BOTTOMRIGHT", -10, 34)
   end
 
   local current = CurrentStep(v)
@@ -2044,8 +2013,6 @@ end
 function ns.PlanUpdated(profession, rebuilt)
   ForgetViews()
   if profession == active then
-    arrivedAt = nil
-    ClearWaypoint()
     -- A dropdown left open would go on showing the goals as they were.
     if rebuilt then CloseDropdowns() end
   end
@@ -2082,10 +2049,13 @@ end
 ns.On("UNIT_SPELLCAST_SUCCEEDED", OnCraft)
 ns.On("PLAYER_ENTERING_WORLD", function()
   ns.Later("planCheck", 5, Check)
-  -- TomTom says when you reach (or remove) the arrow, so it isn't put straight back.
+  -- TomTom says when you reach (or remove) the arrow, and what its arrow points at.
   if HasTomTom() and TomTom.RegisterCallback and not ns.tomtomHooked then
     ns.tomtomHooked = pcall(TomTom.RegisterCallback, ns, "WaypointRemoved", function(_, uid)
       ns.PlanWaypointRemoved(uid)
+    end)
+    pcall(TomTom.RegisterCallback, ns, "ArrowTargetChanged", function(_, uid)
+      ns.PlanArrowTarget(uid)
     end)
   end
 end)

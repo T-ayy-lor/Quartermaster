@@ -12,7 +12,7 @@
 -- trainers, auction prices). While you're working through a plan it's left alone, so its steps
 -- tick off instead of shifting under you.
 -- What's saved is only what you chose: QuartermasterDB.chars[key].planPrefs[profession] =
--- { selected = goal id, showWaypoints = true }.
+-- { selected = goal id, picked = several goal ids }.
 
 local _, ns = ...
 
@@ -290,8 +290,7 @@ Planner.Prefs = Prefs
 -- Goals that haven't been worked out yet: an empty list that says so.
 local function Stub(profession)
   return { profession = profession, title = profession .. " goals", targets = {}, groups = {}, levels = {},
-    stub = true, summary = "Working out your " .. profession .. " goals...",
-    showWaypoints = Prefs(profession).showWaypoints }
+    stub = true, summary = "Working out your " .. profession .. " goals..." }
 end
 
 -- Every profession this character has, each with its goals (a stub until they're worked out).
@@ -314,7 +313,7 @@ function Planner.Set(profession, plan)
   plan.fixed = true
   plan.profession = plan.profession or profession
   local prefs = Prefs(profession)
-  plan.showWaypoints = prefs.showWaypoints
+  prefs.showWaypoints = nil -- the waypoint tick box is gone (0.10)
   for _, t in ipairs(plan.targets or {}) do
     if t.id == prefs.selected and not t.no then plan.selected = t.id end
   end
@@ -411,7 +410,7 @@ local function Build(profession)
   end
   plan.version = built
   local prefs = Prefs(profession)
-  plan.showWaypoints = prefs.showWaypoints
+  prefs.showWaypoints = nil -- the waypoint tick box is gone (0.10)
   -- The goal you picked last time, if it's still there to pick; or the several you picked.
   for _, t in ipairs(plan.targets) do
     if t.id == prefs.selected and not t.no then plan.selected = t.id end

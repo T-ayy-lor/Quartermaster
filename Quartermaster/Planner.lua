@@ -11,7 +11,8 @@
 --     Leather -> Medium Leather), a recorded vendor, or the auction house (your own scans).
 --   - Recipes it doesn't know yet can be used if a recorded trainer or vendor teaches them, or
 --     the pattern is on the auction house. The cost to learn is part of the plan.
---   - The budget is gold on hand. Selling on the auction house is never counted.
+--   - The budget is gold on hand. Selling is never counted, to a vendor or on the auction
+--     house: what's crafted often goes off to be disenchanted.
 -- How it chooses: one skill point at a time, it looks at every usable recipe, works out what the
 -- next stretch of points would cost with that recipe (using up owned materials as it goes), and
 -- takes the cheapest. It repeats this with different weights on "save owned materials for later"
@@ -732,8 +733,9 @@ local Run = {}
 Run.__index = Run
 P.Run = Run
 
-function P.NewRun(recipes, market, owned, weight, noMake)
+function P.NewRun(recipes, market, owned, weight, noMake, prepaid)
   local run = setmetatable({
+    prepaid = prepaid or {},       -- recipes whose learning cost doesn't count against them
     noMake = noMake or {},         -- items never to make from sub-materials (buy them instead)
     recipes = recipes, market = market,
     inv = copy(owned),
@@ -831,7 +833,7 @@ function Run:score(recipe, skill, target)
   local total = 0
   if not self.learned[recipe.spell] then
     if recipe.learn.skill > skill then return nil end
-    total = total + recipe.learn.cost
+    if not self.prepaid[recipe.spell] then total = total + recipe.learn.cost end
   end
   local inv = trialOf(self.inv)
   local best, s = nil, skill
@@ -925,10 +927,23 @@ function P.PlanSkill(key, profession, target, opts)
   for _, weight in ipairs(opts.weights or OWNED_WEIGHTS) do
     local trial = P.NewRun(recipes, market, owned, weight, opts.noMake)
     local got = trial:walk(skill, target)
-    local gold = trial:gold()
-    -- Furthest skill first, then least gold.
-    if not run or got > reached or (got == reached and gold < bestGold) then
-      run, reached, bestGold = trial, got, gold
+    local trials = { { trial, got } }
+    -- A recipe the walk ends up learning is paid for either way. Walk again with those counted
+    -- as paid, so each is switched to where it's cheapest, not where it has paid itself off.
+    local paid, any = {}, false
+    for _, commit in ipairs(trial.commits) do
+      if commit.learn then paid[commit.recipe.spell] = true; any = true end
+    end
+    if any then
+      local again = P.NewRun(recipes, market, owned, weight, opts.noMake, paid)
+      trials[2] = { again, again:walk(skill, target) }
+    end
+    for _, t in ipairs(trials) do
+      local gold = t[1]:gold()
+      -- Furthest skill first, then least gold.
+      if not run or t[2] > reached or (t[2] == reached and gold < bestGold) then
+        run, reached, bestGold = t[1], t[2], gold
+      end
     end
   end
   if reached < target then
@@ -1104,37 +1119,28 @@ function P.PlanSkill(key, profession, target, opts)
   end
   if anyLuck then warnings[#warnings + 1] = P.CHANCE_NOTE end
 
-  -- What's left at the end that the plan made (products), with what a vendor pays for them.
-  local leftovers, leftBy, vendorBack = {}, {}, 0
+  -- What's left at the end that the plan made (products).
+  local leftovers, leftBy = {}, {}
   for _, st in ipairs(stretches) do
     local r = bySpell[st.spell]
     if r.item and not leftBy[r.item] then
       local made = (run.inv[r.item] or 0) - (owned[r.item] or 0)
       if made >= 1 - 1e-6 then
-        local n = floor(made + 1e-6)
-        local sell = P.Item(r.item).sell or 0
-        local l = { item = r.item, name = names(r.item), n = n, vendor = sell * n }
+        local l = { item = r.item, name = names(r.item), n = floor(made + 1e-6) }
         leftovers[#leftovers + 1] = l
         leftBy[r.item] = l
-        vendorBack = vendorBack + sell * n
       end
     end
   end
 
-  -- Money over time: buy each stretch's materials, craft, sell the results to a vendor.
-  local lastOf = {}
-  for i, st in ipairs(stretches) do
-    if st.item then lastOf[st.item] = i end
-  end
+  -- Money over time: each stretch's materials, bought in order. Nothing comes back: what's
+  -- crafted is never counted as sold.
   local wallet, tightest, tightAt = budget, 0, nil
-  for i, st in ipairs(stretches) do
+  for _, st in ipairs(stretches) do
     wallet = wallet - st.gold
-    if wallet < tightest - EPS then tightest, tightAt = wallet, st.from end
-    st.sell = nil
-    local l = st.item and leftBy[st.item]
-    if l and lastOf[st.item] == i then
-      st.sell = { item = l.item, name = l.name, n = l.n, vendor = l.vendor }
-      wallet = wallet + l.vendor
+    if wallet < tightest - EPS then
+      if tightAt == nil then tightAt = st.from end
+      tightest = wallet
     end
   end
   local cashflow = { needExtra = tightest < 0 and ceil(-tightest) or 0, tightAt = tightAt,
@@ -1175,7 +1181,7 @@ function P.PlanSkill(key, profession, target, opts)
   return {
     char = key, profession = profession, from = skill, to = reached, target = target, cap = cap,
     stretches = stretches, learns = learns, ranks = ranks, shopping = shopping, used = used, leftovers = leftovers,
-    cost = { buy = buyTotal, learn = learnTotal, total = total, vendorBack = vendorBack },
+    cost = { buy = buyTotal, learn = learnTotal, total = total },
     gold = budget, short = max(0, total - budget), affordableTo = affordableTo,
     cashflow = cashflow, tradeoffs = tradeoffs, warnings = warnings, skipped = skipped,
     recipesConsidered = #recipes,

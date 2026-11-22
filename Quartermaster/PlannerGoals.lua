@@ -133,7 +133,7 @@ local function delivery(plan, key, market)
   end
 
   -- When the gold on hand covers everything, buy it all in one trip. Otherwise buy in stages:
-  -- each stretch's materials right before it, so selling what you craft pays for the next.
+  -- each stretch's materials right before it, so the gold on hand goes as far as it can.
   -- Auction house buys aren't steps: they're in the materials list, where the plan window turns
   -- them into one shopping list to buy all at once at the start. Vendor buys are trips to a place.
   local staged = plan.short > 0
@@ -187,11 +187,6 @@ local function delivery(plan, key, market)
       title = "Craft " .. st.name,
       sub = ("Until %s %d, %s%d craft%s"):format(plan.profession, st.to, about, st.crafts, plural(st.crafts)),
       icon = st.item, n = st.crafts }
-    if st.sell then
-      local sl = st.sell
-      steps[#steps + 1] = { k = "sell", item = sl.item, icon = sl.item, n = sl.n,
-        title = ("Sell %d %s"):format(sl.n, sl.name), sub = "To any vendor, " .. Money(sl.vendor), near = "vendor" }
-    end
   end
 
   local need = {}
@@ -218,8 +213,7 @@ local function delivery(plan, key, market)
 
   local summary = ("Cost %s. You have %s."):format(Money(plan.cost.total), Money(plan.gold))
   if plan.short > 0 then
-    summary = summary .. (plan.cashflow.needExtra == 0 and " Buy in stages and sell what you craft."
-      or (" %s short even when selling what you craft."):format(Money(plan.cashflow.needExtra)))
+    summary = summary .. (" %s short."):format(Money(plan.short))
   end
   -- What the cheapest plan hides, and what to watch for.
   local notes = {}
@@ -1492,18 +1486,11 @@ end
 ----------------------------------------------------------------------
 
 -- A goal's cost in parts, for the window to show with the gold you have at that moment:
--- { total = copper, parts = { { label, copper } }, notes = { text }, sellBack }.
+-- { total = copper, parts = { { label, copper } }, notes = { text } }.
 local function costsOf(level, skill, to, profession)
   local out = { total = floor((level.cost or 0) + 0.5), parts = {}, notes = {} }
   if to > skill and (level.cost or 0) > 0 then
     out.parts[1] = { ("Leveling %s %d to %d"):format(profession, skill, to), floor(level.cost + 0.5) }
-  end
-  local back = (to > skill and level.plan and level.plan.cost and level.plan.cost.vendorBack) or 0
-  if back > 0 then
-    -- Gold that comes back on the way, so the window can say whether paying as you go works.
-    out.sellBack = floor(back)
-    out.notes[#out.notes + 1] = ("Selling what you craft on the way to a vendor brings back about %s.")
-      :format(Money(back))
   end
   for _, note in ipairs(list(level.notes)) do out.notes[#out.notes + 1] = note end
   return out
