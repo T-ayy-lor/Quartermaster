@@ -472,18 +472,21 @@ function P.Market(key)
     if hit == nil then
       local unit, source
       local v = m.vendors[item]
-      if not v then
-        -- No vendor you've opened sells it: one from Questie's data, at an estimated price.
+      if v and not v.guess then unit, source = v.unit, "vendor" end
+      local p = P.Price(item)
+      if p and (not unit or p < unit) then unit, source = p, "ah" end
+      if not unit then
+        -- No vendor you've opened sells it and it has no auction price: a vendor from Questie's
+        -- data, at an estimated price. An estimate never beats a real price: those vendors
+        -- often stock only one or two (Strange Dust, Copper Modulators), and the guess can be low.
         local guess = P.VendorGuess(key, item)
         if guess then
           v = { unit = guess.unit, name = guess.name, guess = true,
             spot = { map = guess.map, x = guess.x, y = guess.y, zone = guess.zone } }
           m.vendors[item] = v
+          unit, source = v.unit, "vendor"
         end
       end
-      if v then unit, source = v.unit, "vendor" end
-      local p = P.Price(item)
-      if p and (not unit or p < unit) then unit, source = p, "ah" end
       hit = unit and { unit, source } or false
       m.cache[item] = hit
     end
