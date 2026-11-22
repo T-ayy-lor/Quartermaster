@@ -66,7 +66,8 @@ local function SaveProfessions()
   if next(profs) then
     ns.Save("professions", { list = profs })
     ns.profSkill = ns.profSkill or {}
-    for name, p in pairs(profs) do ns.profSkill[name] = p.skill end
+    ns.profMax = ns.profMax or {}
+    for name, p in pairs(profs) do ns.profSkill[name], ns.profMax[name] = p.skill, p.max end
   end
 end
 ns.SaveSkills = SaveProfessions

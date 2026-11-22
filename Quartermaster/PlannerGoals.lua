@@ -21,10 +21,8 @@ ns.Goals = G
 local list, copy, Money, whole = P.list, P.copy, P.Money, P.whole
 local floor, max, min = math.floor, math.max, math.min
 
--- Skill where each rank tops out. The next rank can be trained 25 points before that in Classic;
--- Forever hasn't confirmed it.
-local RANKS = { { 75, "Apprentice" }, { 150, "Journeyman" }, { 225, "Expert" }, { 300, "Artisan" } }
-local BAND = 25
+-- Skill where each rank tops out, and how far before it the next can be trained (Planner.lua).
+local RANKS, BAND = P.RANKS, P.RANK_BAND
 
 -- Professions whose skill comes from doing the thing, not from crafting: what you do, and what
 -- doing it is called. (By the profession's English name, as Recipes.lua has it.)
@@ -100,6 +98,15 @@ local function withWho(spot, who)
   return out
 end
 
+-- The step for training a rank: done once the profession's cap is past where it was.
+local function rankStep(profession, rank)
+  local step = { k = "rank", profession = profession, cap = rank.cap,
+    title = ("Train %s %s"):format(rank.name, profession),
+    sub = ("At %s. It raises the cap past %d"):format(
+      rank.who and (rank.who .. inZone(rank.zone)) or ("a " .. profession .. " trainer"), rank.cap) }
+  return put(step, place(rank))
+end
+
 -- Turns a skill plan into the checklist the plan window shows: steps, materials and a summary.
 local function delivery(plan, key, market)
   local owned = P.Owned(key)
@@ -140,7 +147,13 @@ local function delivery(plan, key, market)
   for _, l in ipairs(plan.learns) do
     if not learnAt[l.spell] then learnAt[l.spell] = l end
   end
+  local ranks, nextRank = list(plan.ranks), 1
   for index, st in ipairs(plan.stretches) do
+    -- A rank is trained right before the first crafts that go past its cap.
+    while ranks[nextRank] and st.to > ranks[nextRank].cap do
+      steps[#steps + 1] = rankStep(plan.profession, ranks[nextRank])
+      nextRank = nextRank + 1
+    end
     local l = learnAt[st.spell]
     learnAt[st.spell] = nil
     if l then
@@ -1125,20 +1138,22 @@ function G.Catalog(key, profession)
   end)
 
   -- ---- how far the recorded recipes can take the skill ---------------------------------
-  local reach = cap
+  -- As far as any goal goes: the top rank, or a recipe that needs more than that.
+  local top = max(cap, RANKS[#RANKS][1])
+  for _, e in ipairs(entries) do top = max(top, e.skill or 0) end
+  local reach = top
   if not gathering then
     local recipes, skipped = P.BuildRecipes(key, profession, true, market)
     plan.recipes, plan.skipped = recipes, skipped
     local owned = {}
     for item, e in pairs(P.Owned(key)) do owned[item] = e.total end
-    reach = P.NewRun(recipes, market, owned, 0):walk(skill, cap)
+    reach = P.NewRun(recipes, market, owned, 0):walk(skill, top)
   end
   plan.reach = reach
 
   -- ---- goals ---------------------------------------------------------------------------
   local targets, groups, byId = plan.targets, plan.groups, {}
   local function whyNot(level)
-    if level > cap then return ("The cap is %d until the next rank is trained."):format(cap) end
     if level > reach then return ("No recorded recipe gives skill points past %d yet."):format(reach) end
   end
   local ids = {}
@@ -1352,11 +1367,19 @@ local function levelPlan(plan, level)
     skillPlan.to = level
     local verb, doing = plan.gathering[1], plan.gathering[2]
     local steps = {}
-    if level > skill then
-      steps[1] = { k = "craft", profession = profession, skill = level,
-        title = ("%s until %s %d"):format(verb, profession, level),
-        sub = "This skill comes from " .. doing .. ", not from crafting" }
+    local function upTo(to)
+      if to > skill then
+        steps[#steps + 1] = { k = "craft", profession = profession, skill = to,
+          title = ("%s until %s %d"):format(verb, profession, to),
+          sub = "This skill comes from " .. doing .. ", not from crafting" }
+      end
     end
+    -- Past the cap: each rank is trained when the skill gets to where it stops.
+    for _, rank in ipairs(P.Ranks(key, profession, plan.cap, level)) do
+      upTo(rank.cap)
+      steps[#steps + 1] = rankStep(profession, rank)
+    end
+    upTo(level)
     entry = { steps = steps, mats = {}, cost = 0, to = level,
       summary = "Nothing to buy: this skill comes from " .. doing .. "." }
   else

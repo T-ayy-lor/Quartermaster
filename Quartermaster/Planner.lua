@@ -221,6 +221,49 @@ function P.VendorGuess() return nil end
 -- { map, x, y, name }, or nil. (PlannerJobs.lua asks Questie when it's installed.)
 function P.NpcPlaces() return nil end
 
+-- Skill where each rank tops out. The next rank can be trained 25 points before that in Classic;
+-- Forever hasn't confirmed it.
+P.RANKS = { { 75, "Apprentice" }, { 150, "Journeyman" }, { 225, "Expert" }, { 300, "Artisan" } }
+P.RANK_BAND = 25
+
+-- The ranks to train on the way from a cap to a target skill, in order: { name, cap (the skill
+-- the rank before it stops at), who, map, x, y, zone }. The place is a recorded trainer of the
+-- profession this character can use: the nearest, or without a position the one seen last.
+function P.Ranks(key, profession, cap, target)
+  local out, at = {}, cap
+  for _, rank in ipairs(P.RANKS) do
+    if rank[1] > at and at < target then
+      if at > 0 then out[#out + 1] = { name = rank[2], cap = at } end
+      at = rank[1]
+    end
+  end
+  if #out == 0 then return out end
+  local who, here = info(key), P.Here()
+  local keys = {}
+  for npc in pairs(ns.db.account.trainers) do keys[#keys + 1] = npc end
+  table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+  local best, bestName
+  for _, id in ipairs(keys) do
+    local t = ns.db.account.trainers[id]
+    local teaches = false
+    if type(t) == "table" and usable(t, who) then
+      for _, s in ipairs(list(t.services)) do
+        if s.skill == profession then teaches = true break end
+      end
+    end
+    local npc = teaches and P.Npc(id)
+    if npc and npc.map and npc.x ~= nil and better(npc, npc.savedAt, best, best and best.savedAt, here) then
+      best, bestName = npc, t.name
+    end
+  end
+  if best then
+    for _, rank in ipairs(out) do
+      rank.who, rank.map, rank.x, rank.y, rank.zone = bestName, best.map, best.x, best.y, best.subzone or best.zone
+    end
+  end
+  return out
+end
+
 -- The nearest recorded place of a kind this character can use ("vendor", "banker", "mailbox",
 -- "auctioneer", "trainer", "crates"): the record from QuartermasterDB.account.npcs, or nil. Without a
 -- position to measure from, the one used most recently.
@@ -829,10 +872,12 @@ function P.PlanSkill(key, profession, target, opts)
   local skill, cap = prof.skill or 0, prof.max or 0
   local warnings = {}
   if target == nil then target = cap end
-  if target > cap then
-    warnings[#warnings + 1] = ("%s is capped at %d until the next rank is trained, so this plan stops at %d.")
-      :format(profession, cap, cap)
-    target = cap
+  -- Past the cap: the plan trains each rank on the way, at the point the skill gets there.
+  local ranks, rankAt = P.Ranks(key, profession, cap, target), {}
+  for _, rank in ipairs(ranks) do
+    rankAt[rank.cap] = true
+    warnings[#warnings + 1] = ("Going past %d needs %s %s, trained at a %s trainer. What that costs isn't counted.")
+      :format(rank.cap, rank.name, profession, profession)
   end
   local market = opts.market or P.Market(key)
   local recipes, skipped = opts.recipes, opts.skipped
@@ -876,7 +921,7 @@ function P.PlanSkill(key, profession, target, opts)
       learns[#learns + 1] = l
     end
     local last = stretches[#stretches]
-    if last and last.spell == r.spell and last.to == commit.skill then
+    if last and last.spell == r.spell and last.to == commit.skill and not rankAt[commit.skill] then
       last.to = last.to + r.points
       last.expected = last.expected + commit.crafts
       last.low = min(last.low, commit.chance)
@@ -1097,7 +1142,7 @@ function P.PlanSkill(key, profession, target, opts)
   local total = buyTotal + learnTotal
   return {
     char = key, profession = profession, from = skill, to = reached, target = target, cap = cap,
-    stretches = stretches, learns = learns, shopping = shopping, used = used, leftovers = leftovers,
+    stretches = stretches, learns = learns, ranks = ranks, shopping = shopping, used = used, leftovers = leftovers,
     cost = { buy = buyTotal, learn = learnTotal, total = total, vendorBack = vendorBack },
     gold = budget, short = max(0, total - budget), affordableTo = affordableTo,
     cashflow = cashflow, tradeoffs = tradeoffs, warnings = warnings, skipped = skipped,

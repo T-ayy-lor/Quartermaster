@@ -341,6 +341,10 @@ local function IsDone(v, i, step)
     return have ~= nil and need ~= nil and have >= need
   elseif k == "learn" then
     return step.spell ~= nil and Try(IsPlayerSpell, step.spell) and true or false
+  elseif k == "rank" then
+    -- Trained once the profession's cap is past where it was.
+    local cap = ns.profMax and step.profession and ns.profMax[step.profession]
+    return cap ~= nil and step.cap ~= nil and cap > step.cap
   elseif k == "sell" then
     local before = v.steps[i - 1]
     return step.item ~= nil and (before == nil or before.done) and step.had and Count(step.item, false) == 0
@@ -1258,7 +1262,7 @@ local function RowClick(self)
         ns.Print("open the auction house and click this again to search for it.")
       end
     end
-  elseif (k == "learn" or k == "sell" or k == "currency" or k == "collect" or k == "bank") and HasTomTom() then
+  elseif (k == "learn" or k == "rank" or k == "sell" or k == "currency" or k == "collect" or k == "bank") and HasTomTom() then
     if not PointTo(step) then
       if step.near then
         ns.Print(step.near == "crates" and "where crates are handed in isn't recorded yet. It's remembered the first time you hand one in."
