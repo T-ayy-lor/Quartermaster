@@ -348,9 +348,17 @@ local function Build(profession)
   plan.version = built
   local prefs = Prefs(profession)
   plan.showWaypoints = prefs.showWaypoints
-  -- The goal you picked last time, if it's still there to pick.
+  -- The goal you picked last time, if it's still there to pick; or the several you picked.
   for _, t in ipairs(plan.targets) do
     if t.id == prefs.selected and not t.no then plan.selected = t.id end
+  end
+  if type(prefs.picked) == "table" and #prefs.picked > 1 then
+    local multi = G.NewMulti(plan, prefs.picked)
+    if #multi.ids > 1 then
+      plan.multi, plan.picked, plan.selected = multi, multi.ids, "multi"
+    elseif #multi.ids == 1 then
+      plan.selected = multi.ids[1]
+    end
   end
   if plan.selected then G.PlanGoal(plan, plan.selected) end
   plans[profession] = plan
@@ -386,7 +394,10 @@ function Planner.Want(profession)
   end
   local id = plan.selected
   if not id then return end
-  for _, t in ipairs(plan.targets) do
+  local targets = plan.targets
+  -- Several goals picked together are one goal of their own.
+  if id == "multi" then targets = { plan.multi } end
+  for _, t in ipairs(targets) do
     if t.id == id and not t.planned and not t.no and t.level then
       if not Queued("build:" .. profession) then
         Enqueue("goal:" .. profession, function()
@@ -397,7 +408,7 @@ function Planner.Want(profession)
           if ns.PlanUpdated then ns.PlanUpdated(profession) end
         end, function()
           -- It went wrong: the goal says so instead of "working it out" forever.
-          for _, goal in ipairs(plan.targets) do
+          for _, goal in ipairs(targets) do
             if goal.id == plan.selected and not goal.planned then
               goal.no = "Something went wrong working out this plan. The error is saved for a bug report."
             end
@@ -414,6 +425,10 @@ end
 function Planner.Pending(plan)
   if not plan or plan.fixed then return false end
   if plan.stub then return not plan.failed end
+  if plan.selected == "multi" then
+    local m = plan.multi
+    return m ~= nil and not m.planned and not m.no
+  end
   for _, t in ipairs(plan.targets) do
     if t.id == plan.selected then return not t.planned and not t.no and t.level ~= nil end
   end

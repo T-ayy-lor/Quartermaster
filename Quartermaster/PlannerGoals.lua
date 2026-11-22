@@ -1374,15 +1374,18 @@ end
 -- recipe, get materials for one, craft it.
 -- Returns the steps, the materials, the gold it adds, the costs that aren't gold, and the Favor
 -- plan (or nil).
-local function tail(plan, skillPlan, e, first)
+-- With `carry` (several goals planned together), materials come out of carry.inv, what's left
+-- goes back into it for the next goal, and any Merchant's Favor is earned once for all of them
+-- beforehand (so not here).
+local function tail(plan, skillPlan, e, first, carry)
   local key, market, src = plan.key, plan.market, e.src
   local run = skillPlan.final
   local ahPlace = P.AuctionHouse(key)
   local steps, gold, others, earn = {}, 0, {}, nil
-  local inventory = run and run.inv or {}
+  local inventory = (carry and carry.inv) or (run and run.inv) or {}
   local already = {}
   for _, l in ipairs(skillPlan.learns) do already[l.spell] = true end
-  local learning = not e.known and not already[e.spell]
+  local learning = not e.known and not already[e.spell] and not (carry and carry.learned[e.spell])
   if learning then
     local how = src.how
     local step = { k = "learn", spell = e.spell, icon = e.item, title = "Learn " .. e.name }
@@ -1401,7 +1404,7 @@ local function tail(plan, skillPlan, e, first)
       for _, o in ipairs(others) do
         if o.currency == FAVOR then wanted = wanted + (o.n or 0) end
       end
-      if wanted > P.Currency(key, FAVOR) then
+      if not carry and wanted > P.Currency(key, FAVOR) then
         earn = G.PlanFavor(key, wanted, copy(inventory), market, plan.cache)
         for _, s in ipairs(favorSteps(earn, key, first)) do steps[#steps + 1] = s end
         gold = gold + earn.gold
@@ -1425,7 +1428,7 @@ local function tail(plan, skillPlan, e, first)
   -- Materials for one craft, from what's left after the skill plan.
   local sim = P.NewRun(run and run.recipes or {}, market, inventory, 0, run and run.noMake)
   sim.whole = true
-  sim.learned = copy(run and run.learned or {})
+  sim.learned = copy((carry and carry.learned) or (run and run.learned) or {})
   local ops, short = {}, {}
   for _, reagent in ipairs(e.reagents) do
     if not sim:acquire(reagent[1], reagent[2], sim.inv, ops) then short[#short + 1] = reagent end
@@ -1445,7 +1448,12 @@ local function tail(plan, skillPlan, e, first)
         local step = { k = "buy", item = item, icon = item, n = n, title = ("Buy %d %s"):format(n, P.ItemName(item)),
           sub = tostring(v.name) .. inZone(npc.zone and (npc.subzone or npc.zone)) .. ", "
             .. (v.guess and "about " or "") .. Money(n * unit) .. (v.guess and " (estimate)" or "") }
-        if first and not earn then step.target = ((owned[item] or {}).total or 0) + n end
+        if first and not earn and not carry then step.target = ((owned[item] or {}).total or 0) + n end
+        if carry then
+          -- So the same purchase for several goals can be folded into one step.
+          step.unit, step.guess = unit, v.guess
+          step.at = tostring(v.name) .. inZone(npc.zone and (npc.subzone or npc.zone))
+        end
         steps[#steps + 1] = put(step, place({ map = npc.map, x = npc.x, y = npc.y, who = v.name }))
       end
     elseif op[1] == "use" then
@@ -1473,7 +1481,13 @@ local function tail(plan, skillPlan, e, first)
         or "Not sold by any vendor you've visited" }
   end
   steps[#steps + 1] = { k = "make", spell = e.spell, n = 1, icon = e.item, title = "Craft " .. e.name,
-    sub = "The goal of this plan" }
+    sub = carry and "One of your goals" or "The goal of this plan" }
+  if carry then
+    -- What's left, and what's now been learned and made, for the next goal.
+    if e.item then sim.inv[e.item] = (sim.inv[e.item] or 0) + (e.makes or 1) end
+    sim.learned[e.spell] = true
+    carry.inv, carry.learned = sim.inv, sim.learned
+  end
   -- The crates and what goes in them count as materials too.
   if earn then
     for _, rows in ipairs({ earn.buys, earn.uses }) do
@@ -1502,7 +1516,178 @@ end
 -- Works out the plan for one goal and puts it on the goal: its level (the skill to reach first,
 -- whose steps are in plan.levels), tail (its own steps), mats, summary and costs.
 -- Returns the goal, or nil if there's no such goal.
+-- Several goals picked together, as one goal of its own ("3 goals: A, B, C"). Its plan is
+-- worked out by G.PlanMulti.
+function G.NewMulti(plan, ids)
+  local names, level, kept = {}, plan.skill or 0, {}
+  for _, id in ipairs(ids) do
+    for _, t in ipairs(plan.targets) do
+      if t.id == id and not t.no and t.level then
+        kept[#kept + 1] = id
+        names[#names + 1] = t.kind == "skill" and (plan.profession .. " " .. t.skill) or t.name
+        level = max(level, t.level)
+      end
+    end
+  end
+  local name = ("%d goals: %s"):format(#kept, table.concat(names, ", "))
+  return { id = "multi", kind = "multi", ids = kept, name = name, title = name, level = level }
+end
+
+-- Works out one plan for several goals: the skill plan to the highest skill any of them needs,
+-- then each recipe in turn, each using what's left after the one before, so nothing is bought
+-- twice. Merchant's Favor for all of them is earned in one go, and purchases at the same
+-- vendor are folded into one step.
+function G.PlanMulti(plan)
+  local m = plan.multi
+  if not m or m.planned or m.no then return m end
+  local key, profession, skill, market = plan.key, plan.profession, plan.skill, plan.market
+  local goals, byId = {}, {}
+  for _, t in ipairs(plan.targets) do byId[t.id] = t end
+  local top = skill
+  for _, id in ipairs(m.ids) do
+    local t = byId[id]
+    if t and not t.no and t.level then
+      goals[#goals + 1] = t
+      top = max(top, t.level)
+    end
+  end
+  if #goals == 0 then
+    m.no = "None of these goals can be planned right now."
+    return m
+  end
+  local level, skillPlan = levelPlan(plan, top)
+  if level.to < top then
+    m.no = ("No recorded recipe gives skill points past %d yet."):format(level.to)
+    return m
+  end
+  m.level = top
+  table.sort(goals, function(a, b)
+    if (a.skill or 0) ~= (b.skill or 0) then return (a.skill or 0) < (b.skill or 0) end
+    return a.id < b.id
+  end)
+  local run = skillPlan.final
+  local carry = { inv = copy(run and run.inv or {}), learned = copy(run and run.learned or {}) }
+  local first = #level.steps == 0
+  local already = {}
+  for _, l in ipairs(skillPlan.learns) do already[l.spell] = true end
+
+  -- Merchant's Favor: what all the patterns cost together, earned once.
+  local steps, gold, earn, favorName = {}, 0, nil, "Merchant's Favor"
+  local wanted = 0
+  for _, t in ipairs(goals) do
+    local e = plan.entries and plan.entries[t.id]
+    if e and not e.known and not already[e.spell] and e.src.how == "vendor" and e.src.confirmed then
+      for _, o in ipairs(list(e.src.others)) do
+        if o.currency == FAVOR then
+          wanted = wanted + (o.n or 0)
+          favorName = o.name or favorName
+        end
+      end
+    end
+  end
+  local need = {} -- item -> material entry, summed over every goal
+  local function addNeed(entry)
+    local old = need[entry.item]
+    if old then old.need = old.need + entry.need else need[entry.item] = entry end
+  end
+  if wanted > P.Currency(key, FAVOR) then
+    earn = G.PlanFavor(key, wanted, copy(carry.inv), market, plan.cache)
+    for _, st in ipairs(favorSteps(earn, key, first)) do steps[#steps + 1] = st end
+    gold = gold + earn.gold
+    carry.inv = earn.inventory
+    for _, rows in ipairs({ earn.buys, earn.uses }) do
+      for _, row in ipairs(rows) do
+        local entry = matEntry(key, row.item, row.n, market, true)
+        entry.name = nameOf(row.item)
+        addNeed(entry)
+      end
+    end
+  end
+
+  -- Each recipe in turn.
+  local buys, buyOrder, body, otherCosts, recipes = {}, {}, {}, {}, 0
+  local unsure = false
+  for _, t in ipairs(goals) do
+    local e = plan.entries and plan.entries[t.id]
+    if e then
+      recipes = recipes + 1
+      local tailSteps, mats, extra, others = tail(plan, skillPlan, e, first, carry)
+      gold = gold + extra
+      for _, st in ipairs(tailSteps) do
+        if st.k == "buy" and st.unit then
+          local k = st.item .. ":" .. tostring(st.at)
+          if not buys[k] then
+            buys[k] = st
+            buyOrder[#buyOrder + 1] = k
+          else
+            buys[k].n = buys[k].n + st.n
+          end
+        else
+          body[#body + 1] = st
+        end
+      end
+      for _, entry in ipairs(mats) do addNeed(entry) end
+      for _, o in ipairs(others) do
+        if o.currency ~= FAVOR or not earn then otherCosts[#otherCosts + 1] = o end
+      end
+      if not e.known and (e.src.how == "drop" or e.src.how == "quest" or e.src.how == "unknown" or not e.src.confirmed) then
+        unsure = true
+      end
+    end
+    P.Yield()
+  end
+  -- One trip to each vendor for everything the goals need there.
+  local owned = P.Owned(key)
+  for _, k in ipairs(buyOrder) do
+    local st = buys[k]
+    st.title = ("Buy %d %s"):format(st.n, P.ItemName(st.item))
+    st.sub = st.at .. ", " .. (st.guess and "about " or "") .. Money(st.n * st.unit) .. (st.guess and " (estimate)" or "")
+    if first and not earn then st.target = ((owned[st.item] or {}).total or 0) + st.n end
+    st.unit, st.at, st.guess = nil, nil, nil
+    steps[#steps + 1] = st
+  end
+  for _, st in ipairs(body) do steps[#steps + 1] = st end
+
+  local mats = {}
+  for _, entry in pairs(need) do mats[#mats + 1] = entry end
+  table.sort(mats, function(a, b)
+    if a.name ~= b.name then return a.name < b.name end
+    return a.item < b.item
+  end)
+
+  local total = level.cost + gold
+  local costs = costsOf(level, skill, top, profession)
+  local summary = ("Cost %s. You have %s."):format(Money(total), Money(P.Gold(key)))
+  if earn and earn.crateCount > 0 then
+    costs.parts[#costs.parts + 1] = { ("%d crate%s for %d %s"):format(earn.crateCount, plural(earn.crateCount),
+      earn.need, favorName), floor(earn.gold + 0.5) }
+    summary = summary .. (" That includes about %s for %d crate%s, to earn the %d %s these cost.")
+      :format(Money(earn.gold), earn.crateCount, plural(earn.crateCount), earn.need, favorName)
+  end
+  local rest = gold - (earn and earn.gold or 0)
+  if rest > 0.5 then
+    costs.parts[#costs.parts + 1] = { ("Learning and materials for %d item%s"):format(recipes, plural(recipes)),
+      floor(rest + 0.5) }
+  end
+  costs.total = floor(total + 0.5)
+  if earn and earn.short > 0 then
+    costs.notes[#costs.notes + 1] = ("Crates for %d of the %d %s couldn't be found or priced.")
+      :format(earn.short, earn.need, favorName)
+  end
+  for _, o in ipairs(otherCosts) do
+    costs.notes[#costs.notes + 1] = ("Also %s %s."):format(tostring(o.n), tostring(o.name))
+  end
+  if unsure then costs.notes[#costs.notes + 1] = "Where to learn one of these isn't confirmed." end
+  if earn then
+    for _, w in ipairs(earn.warnings) do costs.notes[#costs.notes + 1] = w end
+    costs.notes[#costs.notes + 1] = earn.note
+  end
+  m.tail, m.mats, m.summary, m.costs, m.planned = steps, (#mats > 0 and mats or nil), summary, costs, true
+  return m
+end
+
 function G.PlanGoal(plan, id)
+  if id == "multi" then return G.PlanMulti(plan) end
   local t
   for _, target in ipairs(plan.targets) do
     if target.id == id then t = target end

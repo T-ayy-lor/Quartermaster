@@ -22,7 +22,8 @@ Download `Quartermaster-<version>.zip` from the
 ## Use
 
 1. Open a profession window. The plan opens beside it.
-2. Pick a goal from the dropdown.
+2. Pick a goal from the dropdown. Another dropdown appears under it to add a second goal, and
+   so on: they're planned together, so nothing is bought twice.
 3. Press **Shopping list** to buy what's missing at the auction house.
 4. Work through the steps. Click a crafting step to craft it; click any other step to point
    the way.

@@ -111,6 +111,8 @@ end
 
 local function Target(plan, id)
   if type(plan.targets) ~= "table" or id == nil then return nil end
+  -- Several goals picked together are one goal of their own.
+  if id == "multi" then return plan.multi end
   for _, t in ipairs(plan.targets) do
     if t.id == id then return t end
   end
@@ -629,7 +631,7 @@ end
 -- a recipe you don't know, its cost in whatever it's paid in (green if you can pay it now, red
 -- if not).
 local function GoalLabel(t, plan)
-  if t.kind == "skill" then return GOLD .. tostring(t.name) .. "|r" end
+  if t.kind == "skill" or t.kind == "multi" then return GOLD .. tostring(t.name) .. "|r" end
   local have = plan and plan.profession and ns.profSkill and ns.profSkill[plan.profession]
   -- Already crafted: the whole line is grey.
   if t.made then
@@ -669,14 +671,87 @@ local function SelectInProfessionWindow(plan, id)
   return false
 end
 
+-- Whether a goal is one of those picked (the one showing, or one of several).
+local function IsPicked(plan, id)
+  if plan.selected == id then return true end
+  if plan.selected == "multi" and plan.multi then
+    for _, picked in ipairs(plan.multi.ids) do
+      if picked == id then return true end
+    end
+  end
+  return false
+end
+
+-- The goals picked, in the order of their dropdowns.
+local function PickedIds(plan)
+  if plan.selected == "multi" and plan.multi then
+    local ids = {}
+    for i, id in ipairs(plan.multi.ids) do ids[i] = id end
+    return ids
+  end
+  return plan.selected and { plan.selected } or {}
+end
+
+-- Sets the goals picked: one is an ordinary goal; two or more are planned together as one.
+local function SetPicked(plan, ids)
+  local prefs = plan.profession and ns.Planner.Prefs(plan.profession) or {}
+  if #ids == 1 then
+    plan.multi, plan.picked, plan.selected = nil, nil, ids[1]
+    prefs.picked, prefs.selected = nil, ids[1]
+  else
+    plan.multi = ns.Goals.NewMulti(plan, ids)
+    plan.picked, plan.selected = plan.multi.ids, "multi"
+    prefs.picked, prefs.selected = plan.multi.ids, "multi"
+  end
+  arrivedAt = nil
+  ns.MarkDirty("plan")
+  ForgetViews()
+  -- The plan is worked out now, from what you have at this moment.
+  if active then ns.Planner.Want(active) end
+  ns.PlanCheck()
+end
+
+-- How many goals can be picked together (one dropdown each).
+local MAX_GOALS = 5
+
+-- Puts a goal in one of the goal dropdowns: index 1 is the first, and the next index after the
+-- last picked goal adds another. With no id, that dropdown's goal is taken out. Returns true if
+-- anything changed.
+function ns.PlanPick(index, id)
+  local plan = Plan()
+  if not plan or plan.fixed and index ~= 1 then return false end
+  local ids = PickedIds(plan)
+  if id == nil then
+    if #ids <= 1 or not ids[index] then return false end -- the last goal stays
+    table.remove(ids, index)
+  else
+    local t = Target(plan, id)
+    if not t or t.no or id == "multi" or index < 1 or index > math.min(#ids + 1, MAX_GOALS) then return false end
+    for i, picked in ipairs(ids) do
+      if picked == id and i ~= index then return false end -- already in another dropdown
+    end
+    ids[index] = id
+  end
+  if plan.fixed then
+    -- Ready-made goals can't be combined: just the one.
+    return ns.PlanSelect(ids[1])
+  end
+  if id and #ids == 1 then SelectInProfessionWindow(plan, id) end
+  SetPicked(plan, ids)
+  return true
+end
+
+-- Picks one goal, replacing whatever was picked.
 function ns.PlanSelect(id)
   local plan = Plan()
   local t = plan and Target(plan, id)
-  if not t or t.no then return false end
+  if not t or t.no or id == "multi" then return false end
+  local prefs = plan.profession and ns.Planner.Prefs(plan.profession) or {}
   SelectInProfessionWindow(plan, id)
   if plan.selected ~= id then
     plan.selected = id
-    if plan.profession then ns.Planner.Prefs(plan.profession).selected = id end
+    plan.multi, plan.picked = nil, nil
+    prefs.selected, prefs.picked = id, nil
     arrivedAt = nil
     ns.MarkDirty("plan")
   end
@@ -754,9 +829,10 @@ end
 -- opened out of. ("Close" alone only shuts the innermost list.)
 local function CloseDropdowns()
   if window then
-    for _, dropdown in ipairs({ window.goal, window.prof }) do
-      if dropdown and type(dropdown.CloseMenu) == "function" then pcall(dropdown.CloseMenu, dropdown) end
+    for _, dropdown in ipairs(window.goals or {}) do
+      if type(dropdown.CloseMenu) == "function" then pcall(dropdown.CloseMenu, dropdown) end
     end
+    if window.prof and type(window.prof.CloseMenu) == "function" then pcall(window.prof.CloseMenu, window.prof) end
   end
   return MenuResponse and (MenuResponse.CloseAll or MenuResponse.Close) or nil
 end
@@ -764,20 +840,36 @@ end
 -- Fills the goal dropdown each time it opens: the skill checkpoints first, then the recipes
 -- in groups by where they come from. A goal that can't be planned yet is listed but can't be
 -- picked.
-local function GoalMenu(_, root)
+-- `index` is which goal dropdown this is: the first, or one added below it for another goal.
+local function GoalMenu(_, root, index)
+  index = index or 1
   local plan = Plan()
   if not plan then return end
   if type(plan.targets) ~= "table" then plan = { targets = {}, groups = {} } end
   if type(plan.groups) ~= "table" then return end
   local byId = {}
   for _, t in ipairs(plan.targets) do byId[t.id] = t end
+  local picked = PickedIds(plan)
+  local elsewhere = {}
+  for i, id in ipairs(picked) do
+    if i ~= index then elsewhere[id] = true end
+  end
+  -- A dropdown holding one of several goals can give its goal up.
+  if picked[index] and #picked > 1 and root.CreateButton then
+    root:CreateButton("|cffff8040Remove this goal|r", function()
+      ns.PlanPick(index, nil)
+      return CloseDropdowns()
+    end)
+  end
   local function add(parent, t)
     local radio = parent:CreateRadio(GoalLabel(t, plan),
-      function() return plan.selected == t.id end,
+      function() return picked[index] == t.id end,
       function()
-        ns.PlanSelect(t.id)
+        ns.PlanPick(index, t.id)
         return CloseDropdowns()
       end, t.id)
+    -- A goal already in another dropdown can't be picked twice.
+    if elsewhere[t.id] and radio.SetEnabled then radio:SetEnabled(false) end
     if t.no and radio.SetEnabled then radio:SetEnabled(false) end
     if radio.SetTooltip then radio:SetTooltip(GoalTooltip(t, plan)) end
   end
@@ -1385,15 +1477,21 @@ local function Build()
     prof:Hide()
     frame.prof = prof
   end
-  local okGoal, goal = pcall(CreateFrame, "DropdownButton", nil, frame, "WowStyle1DropdownTemplate")
-  if okGoal and goal and goal.SetupMenu then
-    goal:SetPoint("TOPLEFT", HEADER_LEFT, -32 - HEADER_ROW)
+  -- One goal dropdown for each goal picked, and one more below them to add another.
+  frame.goals = {}
+  function frame.GoalDropdown(i)
+    if frame.goals[i] then return frame.goals[i] end
+    local okGoal, goal = pcall(CreateFrame, "DropdownButton", nil, frame, "WowStyle1DropdownTemplate")
+    if not (okGoal and goal and goal.SetupMenu) then return nil end
+    goal:SetPoint("TOPLEFT", HEADER_LEFT, -32 - i * HEADER_ROW)
     goal:SetPoint("RIGHT", frame, "RIGHT", -HEADER_RIGHT, 0)
     goal:SetHeight(24)
-    pcall(goal.SetupMenu, goal, GoalMenu)
+    pcall(goal.SetupMenu, goal, function(dropdown, root) GoalMenu(dropdown, root, i) end)
     goal:Hide()
-    frame.goal = goal
+    frame.goals[i] = goal
+    return goal
   end
+  frame.goal = frame.GoalDropdown(1)
 
   frame.summary = frame:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
   -- The text lines up with the text inside the dropdowns above it.
@@ -1550,16 +1648,31 @@ function Refresh()
     local set = window.prof.OverrideText or window.prof.SetDefaultText or window.prof.SetText
     if set then pcall(set, window.prof, tostring(active or plan.profession or "Plan")) end
   end
-  -- The goal dropdown shows when there are goals to pick from, with the picked goal on it.
-  if window.goal then
-    local goals = type(plan.targets) == "table" and #plan.targets > 0
-    window.goal:SetShown(goals and true or false)
-    if goals then
-      local label = v.target and GoalLabel(v.target, plan) or (tostring(plan.profession or "Plan") .. ": pick a goal")
-      local set = window.goal.OverrideText or window.goal.SetDefaultText or window.goal.SetText
-      if set then pcall(set, window.goal, label) end
+  -- A goal dropdown for each goal picked, and one more under them to add another. Everything
+  -- below moves down a row for each.
+  local goalRows = 0
+  local hasGoals = type(plan.targets) == "table" and #plan.targets > 0
+  if hasGoals then
+    local picked = PickedIds(plan)
+    goalRows = math.min(#picked + ((plan.fixed or #picked == 0) and 0 or 1), MAX_GOALS)
+    if goalRows < 1 then goalRows = 1 end
+    for i = 1, goalRows do
+      local dropdown = window.GoalDropdown(i)
+      if dropdown then
+        local t = picked[i] and Target(plan, picked[i])
+        local label = t and GoalLabel(t, plan)
+          or (i == 1 and (tostring(plan.profession or "Plan") .. ": pick a goal") or (GREY .. "Add another goal...|r"))
+        local set = dropdown.OverrideText or dropdown.SetDefaultText or dropdown.SetText
+        if set then pcall(set, dropdown, label) end
+        dropdown:Show()
+      end
     end
   end
+  for i = goalRows + 1, #window.goals do window.goals[i]:Hide() end
+  window.headerRows = goalRows
+  window.summary:ClearAllPoints()
+  window.summary:SetPoint("TOPLEFT", HEADER_LEFT + 8, -32 - (goalRows + 1) * HEADER_ROW - 6)
+  window.summary:SetPoint("RIGHT", window, "RIGHT", -HEADER_RIGHT - 4, 0)
   local icon = ProfessionIcon(plan.profession)
   if window.SetPortraitToAsset then
     window:SetPortraitToAsset(icon)
@@ -1575,9 +1688,11 @@ function Refresh()
     window.way.label:SetShown(tomtom)
     window.way:SetChecked(plan.showWaypoints and true or false)
     window.way.label:SetText("Show TomTom waypoints")
+    window.way:ClearAllPoints()
+    window.way:SetPoint("TOPLEFT", HEADER_LEFT + 3, -32 - (goalRows + 2) * HEADER_ROW)
     if window.inset then
       window.inset:ClearAllPoints()
-      window.inset:SetPoint("TOPLEFT", 10, -32 - (tomtom and 4 or 3) * HEADER_ROW)
+      window.inset:SetPoint("TOPLEFT", 10, -32 - (goalRows + (tomtom and 3 or 2)) * HEADER_ROW)
       window.inset:SetPoint("BOTTOMRIGHT", -10, 34)
     end
   end
