@@ -1082,14 +1082,13 @@ local function HostOverhang(host)
   return most - right
 end
 
--- The game windows the plan comes up beside, and the kinds of step each one is for. The
--- auction house has none: the plan you last looked at always comes up there.
+-- The game windows the plan comes up beside (which steps each serves: StepAt, further down).
 local VENUES = {
   auction  = { frames = { "AuctionHouseFrame", "AuctionFrame" } },
-  merchant = { frames = { "MerchantFrame" }, steps = { buy = true, learn = true } },
-  trainer  = { frames = { "ClassTrainerFrame" }, steps = { learn = true, rank = true } },
-  bank     = { frames = { "BankFrame" }, steps = { bank = true } },
-  mail     = { frames = { "MailFrame" }, steps = { collect = true } },
+  merchant = { frames = { "MerchantFrame" } },
+  trainer  = { frames = { "ClassTrainerFrame" } },
+  bank     = { frames = { "BankFrame" } },
+  mail     = { frames = { "MailFrame" } },
 }
 local venue -- the kind opened last and still open, or nil
 
@@ -2067,26 +2066,87 @@ function ns.PlanUpdated(profession, rebuilt)
 end
 
 -- At a vendor, trainer, bank, mailbox or the auction house: the plan you last looked at comes
--- up beside that window when a step still to do is for that kind of place (the auction house:
--- always), and goes away with it. A plan that's already up moves beside the window and stays.
+-- up beside that window only when that very window serves a step still to do, and goes away
+-- with it. A plan that's already up moves beside such a window and stays. A window with nothing
+-- for the plan (a class or pet trainer, Beast Training, a vendor selling none of it) is left alone.
+local function NpcName()
+  local name = Try(UnitName, "npc")
+  return ns.Plain(name) and name or nil
+end
+
+-- What a "Learn X" step teaches.
+local function LearnName(step)
+  return type(step.title) == "string" and step.title:match("^Learn (.+)$") or nil
+end
+
+-- Does the open vendor sell this item, or (by name) the pattern for this recipe?
+local function MerchantSells(item, recipe)
+  for i = 1, Try(GetMerchantNumItems) or 0 do
+    local id = (GetMerchantItemID and Try(GetMerchantItemID, i)) or ns.ItemID(GetMerchantItemLink and Try(GetMerchantItemLink, i))
+    if item and id == item then return true end
+    if recipe then
+      local info = C_MerchantFrame and C_MerchantFrame.GetItemInfo and Try(C_MerchantFrame.GetItemInfo, i)
+      local name = (info and info.name) or (GetMerchantItemInfo and Try(GetMerchantItemInfo, i))
+      if ns.Plain(name) and type(name) == "string" and (name == recipe or name:sub(-#recipe - 2) == ": " .. recipe) then
+        return true
+      end
+    end
+  end
+  return false
+end
+
+-- Does the open trainer teach this profession, or this recipe by name? Never a class or pet
+-- trainer, and never a trainer window with no NPC behind it (Beast Training).
+local function TrainerTeaches(profession, recipe)
+  if not NpcName() then return false end
+  if IsTradeskillTrainer and not Try(IsTradeskillTrainer) then return false end
+  for i = 1, Try(GetNumTrainerServices) or 0 do
+    local name = Try(GetTrainerServiceInfo, i)
+    if recipe and ns.Plain(name) and name == recipe then return true end
+    if profession then
+      local skill = Try(GetTrainerServiceSkillReq, i)
+      local line = GetTrainerServiceSkillLine and Try(GetTrainerServiceSkillLine, i)
+      if (ns.Plain(skill) and skill == profession) or (ns.Plain(line) and line == profession) then return true end
+    end
+  end
+  return false
+end
+
+local function StepAt(kind, step)
+  local k = step.k
+  if kind == "auction" then return k == "auction" or step.near == "auctioneer" end
+  if kind == "bank" then return k == "bank" end
+  if kind == "mail" then return k == "collect" end
+  if step.near == "auctioneer" then return false end
+  local npc = NpcName()
+  local named = npc and step.where == npc
+  if kind == "merchant" then
+    if k == "buy" then return named or MerchantSells(step.item) end
+    if k == "learn" then return named or MerchantSells(nil, LearnName(step)) end
+  elseif kind == "trainer" then
+    if k == "rank" then return TrainerTeaches(step.profession or active) end
+    if k == "learn" then return TrainerTeaches(nil, LearnName(step)) or (named and TrainerTeaches(active)) end
+  end
+  return false
+end
+
 local function VenueWanted(kind)
-  local kinds = VENUES[kind].steps
-  if not kinds then return true end
   local v = View()
   for _, step in ipairs(v and v.steps or {}) do
-    if not step.done and kinds[step.k] then return true end
+    if not step.done and StepAt(kind, step) then return true end
   end
   return false
 end
 
 local function OnVenueOpen(kind)
-  venue = kind
-  -- Only once you've looked at a plan on this character.
+  -- Only once you've looked at a plan on this character, and only at a window the plan has
+  -- something to do at.
   local c = ns.Char()
-  if not (c and c.planShown) or not Plan() then return end
+  if not (c and c.planShown) or not Plan() or not VenueWanted(kind) then return end
+  venue = kind
   if window and window:IsShown() then
     Place()
-  elseif VenueWanted(kind) then
+  else
     Show(true, true)
   end
 end
@@ -2155,6 +2215,10 @@ for kind, events in pairs({ auction = { "AUCTION_HOUSE_SHOW", "AUCTION_HOUSE_CLO
   ns.On(events[1], function() C_Timer.After(0.3, function() ns.Run("planVenue", OnVenueOpen, kind) end) end)
   ns.On(events[2], function() ns.Run("planVenue", OnVenueClosed, kind) end)
 end
+-- A trainer's list can arrive after its window: look again when it does.
+ns.On("TRAINER_UPDATE", function()
+  if venue ~= "trainer" and VenueWindow("trainer") then ns.Run("planVenue", OnVenueOpen, "trainer") end
+end)
 for _, event in ipairs({ "TRADE_SKILL_SHOW", "TRADE_SKILL_DATA_SOURCE_CHANGED", "TRADE_SKILL_LIST_UPDATE",
   "TRADE_SKILL_DETAILS_UPDATE" }) do
   ns.On(event, QueueFollow)
