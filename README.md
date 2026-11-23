@@ -5,7 +5,7 @@ gear upgrade) and it works out the cheapest way there from what you own, vendor 
 prices, and auction prices. The steps appear beside your profession window and tick themselves
 off as you go.
 
-**Version 0.10.2-beta.** Expect rough edges.
+**Version 0.10.3-beta.** Expect rough edges.
 
 ## Requirements
 

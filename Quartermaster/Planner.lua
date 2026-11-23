@@ -540,6 +540,41 @@ function P.Recipes(key, profession)
 end
 
 ----------------------------------------------------------------------
+-- Camp stations: things a recipe has to be made beside that no town has. Players make them
+-- (or buy them at the auction house) and place them at a campfire, where they're used up.
+-- The plan counts one as a material, bought or made once.
+----------------------------------------------------------------------
+
+-- Station name (as the profession window names the requirement) -> the item you place.
+-- "Anvil" isn't here: towns have anvils.
+P.STATIONS = {
+  ["Tanning Rack"] = 279941, ["Sewing Machine"] = 279945, ["Spinning Wheel"] = 279943, ["Loom"] = 279959,
+  ["Fermenter"] = 279970, ["Alchemy Laboratory"] = 279990, ["Arcane Forge"] = 279987,
+  ["Anarchist's Workbench"] = 279989, ["Iron Oven"] = 279982, ["Molten Foundry"] = 279952,
+  ["Master Forge"] = 279955, ["Plague Doctor's Laboratory"] = 279951, ["Trapper's Workbench"] = 279938,
+  ["Seed Hybridizer"] = 279947,
+}
+-- Leatherworking recipes that need a Tanning Rack, for before the profession window has said
+-- so itself (from a players' guide, not the game's data).
+local TANNING = {}
+for _, spell in ipairs({ 1255087,1255085,1255086,1255084,1255083,1255082,1255081,1255080,1255078,1255079,1255077,1255076,1255075,1255071,1255070,1255068,1255069,1255067,1255066,1255065,1255064,1255063,1255062,1255061,1255060,1255011,1255009,1255010,1255008,1255007,1255005,1255006,1255004,1255003,1255001,1255002,1255000,23399,3778,22711,10619,10621,10630,19047,10647,10632,10650,19050 }) do TANNING[spell] = true end
+
+-- The station item a recipe needs, or nil. What the profession window recorded wins.
+function P.Station(key, profession, spell)
+  local c = P.Char(key)
+  local seen = c and c.recipes and c.recipes[profession]
+  local r = seen and type(seen.recipes) == "table" and seen.recipes[spell]
+  if type(r) == "table" and type(r.needs) == "table" then
+    for _, name in ipairs(r.needs) do
+      if P.STATIONS[name] then return P.STATIONS[name] end
+    end
+    return nil
+  end
+  if profession == "Leatherworking" and TANNING[spell] then return P.STATIONS["Tanning Rack"] end
+  return nil
+end
+
+----------------------------------------------------------------------
 -- The market: where to buy one item, and for how much
 ----------------------------------------------------------------------
 
@@ -716,6 +751,7 @@ function P.BuildRecipes(key, profession, includeAHPatterns, market)
             spell = spell, name = r.name or ref.n or ("recipe " .. spell), item = r.item,
             makes = max(1, r.min or 1), reagents = reagents, difficulty = ref.d, required = required,
             known = known, learn = learn, points = max(1, r.skillUps or 1),
+            station = P.Station(key, profession, spell),
           }
         end
       end
@@ -741,6 +777,7 @@ function P.NewRun(recipes, market, owned, weight, noMake, prepaid)
     inv = copy(owned),
     weight = weight,               -- how much owned materials are "worth saving" (0 = free)
     learned = {}, makers = {},     -- makers: item -> recipes that produce it
+    placed = {},                   -- camp stations already got for this plan
     commits = {},                  -- one per skill point gained
     whole = false,                 -- true: sub-crafts are made in whole numbers
   }, Run)
@@ -836,6 +873,12 @@ function Run:score(recipe, skill, target)
     if not self.prepaid[recipe.spell] then total = total + recipe.learn.cost end
   end
   local inv = trialOf(self.inv)
+  -- A camp station it's made beside: one, the first time a recipe needs it.
+  if recipe.station and not self.placed[recipe.station] then
+    local g, soft = self:acquire(recipe.station, 1, inv, {})
+    if not g then return nil end
+    total = total + g + soft
+  end
   local best, s = nil, skill
   local scratch = {}
   for _ = 1, min(LOOKAHEAD, target - skill) do
@@ -876,7 +919,13 @@ function Run:walk(skill, target)
       self.learned[recipe.spell] = true
       learn = recipe.learn
     end
+    local stationGold = 0
+    if recipe.station and not self.placed[recipe.station] then
+      self.placed[recipe.station] = true
+      stationGold = self:acquire(recipe.station, 1, self.inv, ops) or 0
+    end
     local g, _, crafts = self:craftOnce(recipe, skill, self.inv, ops)
+    g = g + stationGold
     self.commits[#self.commits + 1] = { recipe = recipe, skill = skill, crafts = crafts, gold = g,
       chance = chance(skill, recipe.difficulty), ops = ops, learn = learn }
     skill = skill + recipe.points
@@ -992,6 +1041,12 @@ function P.PlanSkill(key, profession, target, opts)
     final.learned[r.spell] = true
     st.crafts = whole(st.expected)
     local ops = {}
+    -- The camp station these crafts are made beside: one, before the first stretch that needs it.
+    if r.station and not final.placed[r.station] then
+      final.placed[r.station] = true
+      final:acquire(r.station, 1, final.inv, ops)
+      st.station = r.station
+    end
     for _, reagent in ipairs(r.reagents) do
       final:acquire(reagent[1], reagent[2] * st.crafts, final.inv, ops)
     end

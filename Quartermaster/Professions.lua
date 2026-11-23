@@ -35,7 +35,21 @@ local function ReadModern(T)
           ns.Items.Note(first.itemID)
         end
       end
+      -- What the recipe has to be made beside or with ("Tanning Rack", "Anvil"), by name.
+      local needs
+      if T.GetRecipeRequirements then
+        local reqs = Try(T.GetRecipeRequirements, id)
+        if type(reqs) == "table" then
+          needs = {}
+          for _, req in ipairs(reqs) do
+            if type(req) == "table" and ns.Plain(req.name) and type(req.name) == "string" and req.name ~= "" then
+              needs[#needs + 1] = req.name
+            end
+          end
+        end
+      end
       out.recipes[id] = {
+        needs = needs,
         name = r.name, item = itemID, min = sch and sch.quantityMin,
         -- Known for real: a spell on your character. (The window's own "learned" flag is wrong
         -- for some vendor patterns on Forever: they show as learned before you buy them.)

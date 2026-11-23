@@ -98,6 +98,12 @@ local function withWho(spot, who)
   return out
 end
 
+-- The step for putting down a camp station (a Tanning Rack) before the crafts that need it.
+local function stationStep(item)
+  return { k = "station", item = item, icon = item, n = 1, title = "Place a " .. P.ItemName(item),
+    sub = "Beside a campfire, then craft next to it. It's used up when placed" }
+end
+
 -- The step for training a rank: done once the profession's cap is past where it was.
 local function rankStep(profession, rank)
   local step = { k = "rank", profession = profession, cap = rank.cap,
@@ -176,6 +182,7 @@ local function delivery(plan, key, market)
         sub = "From " .. table.concat(#m.from > 0 and m.from or { "what you have" }, ", "),
         icon = m.item, spell = m.spell, n = m.n }
     end
+    if st.station then steps[#steps + 1] = stationStep(st.station) end
     local about = st.low >= 1 and "" or "about "
     steps[#steps + 1] = { k = "craft", spell = st.spell, skill = st.to, profession = plan.profession,
       title = "Craft " .. st.name,
@@ -1679,7 +1686,15 @@ local function tail(plan, skillPlan, e, first, carry)
   for _, reagent in ipairs(e.reagents) do
     if not sim:acquire(reagent[1], reagent[2], sim.inv, ops) then short[#short + 1] = reagent end
   end
+  -- A camp station it's made beside, unless the plan already has one by now.
+  local placed = (carry and carry.placed) or (run and run.placed) or {}
+  local station = P.Station(key, plan.profession, e.spell)
+  if station and placed[station] then station = nil end
+  if station and not sim:acquire(station, 1, sim.inv, ops) then short[#short + 1] = { station, 1 } end
   local need, made, madeOrder = {}, {}, {}
+  -- The goal's own vendor buys go first, before any trip for crates or reputation, so town is
+  -- left once with everything bought.
+  local trips = {}
   local owned = P.Owned(key)
   local function up(n) return floor(n + 0.4999 + 0.5) end
   for _, op in ipairs(ops) do
@@ -1699,7 +1714,7 @@ local function tail(plan, skillPlan, e, first, carry)
         -- vendor (G.FoldBuys), or across several goals.
         step.unit, step.guess = unit, v.guess
         step.at = tostring(v.name) .. inZone(npc.zone and (npc.subzone or npc.zone))
-        steps[#steps + 1] = put(step, place({ map = npc.map, x = npc.x, y = npc.y, who = v.name }))
+        trips[#trips + 1] = put(step, place({ map = npc.map, x = npc.x, y = npc.y, who = v.name }))
       end
     elseif op[1] == "use" then
       need[op[2]] = (need[op[2]] or 0) + up(op[3])
@@ -1725,9 +1740,11 @@ local function tail(plan, skillPlan, e, first, carry)
       sub = P.HasAuctions() and "No price is known: not at a recorded vendor or in your auction scans"
         or "Not sold by any vendor you've visited" }
   end
+  if station then steps[#steps + 1] = stationStep(station) end
   steps[#steps + 1] = { k = "make", spell = e.spell, n = 1, icon = e.item, title = "Craft " .. e.name,
     sub = carry and "One of your goals" or "The goal of this plan" }
   if carry then
+    if station then carry.placed[station] = true end
     -- What's left, and what's now been learned and made, for the next goal.
     if e.item then sim.inv[e.item] = (sim.inv[e.item] or 0) + (e.makes or 1) end
     sim.learned[e.spell] = true
@@ -1757,6 +1774,7 @@ local function tail(plan, skillPlan, e, first, carry)
   for _, m in ipairs(mats) do
     if m.item == pattern then m.name = P.Item(m.item).name or ("Pattern: " .. e.name) end
   end
+  for i, st in ipairs(trips) do table.insert(steps, i, st) end
   return steps, mats, gold, others, earn, rep
 end
 
@@ -1813,7 +1831,8 @@ function G.PlanMulti(plan)
     return a.id < b.id
   end)
   local run = skillPlan.final
-  local carry = { inv = copy(run and run.inv or {}), learned = copy(run and run.learned or {}) }
+  local carry = { inv = copy(run and run.inv or {}), learned = copy(run and run.learned or {}),
+    placed = copy(run and run.placed or {}) }
   local first = #level.steps == 0
   local already = {}
   for _, l in ipairs(skillPlan.learns) do already[l.spell] = true end

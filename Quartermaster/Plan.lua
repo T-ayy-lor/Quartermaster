@@ -425,6 +425,11 @@ local function IsDone(v, i, step)
     local info = step.cur and C_CurrencyInfo and C_CurrencyInfo.GetCurrencyInfo
       and Try(C_CurrencyInfo.GetCurrencyInfo, step.cur)
     return info ~= nil and step.favor ~= nil and (info.quantity or 0) >= step.favor
+  elseif k == "station" then
+    -- Placed once the one you held is gone, or once the craft it's for (the next step) is done.
+    if step.item and (step.peak or 0) >= 1 and Count(step.item, true) < step.peak then return true end
+    local after = v.steps[i + 1]
+    return after ~= nil and (after.k == "make" or after.k == "craft") and after.done == true
   elseif k == "learn" then
     return step.spell ~= nil and Try(IsPlayerSpell, step.spell) and true or false
   elseif k == "rank" then
@@ -459,6 +464,9 @@ local function CheckSteps(v)
   -- that share a crate or a material count on from one another, in order.
   local crateSum, matSum = {}, {}
   for _, step in ipairs(v.steps) do
+    if step.k == "station" and not step.done and step.item then
+      step.peak = math.max(step.peak or 0, Count(step.item, true))
+    end
     if step.k == "fill" and not step.done then
       if step.crate then
         step.cratePeak = math.max(step.cratePeak or 0, Count(step.crate, true))
@@ -720,8 +728,27 @@ local GROUP_COLOR = {
   quest = "|cffffff00", drop = "|cffa335ee", auto = WHITE, unknown = GREY,
 }
 
-local function IconText(item)
-  local texture = item and Try(GetItemIcon, item)
+-- A recipe's own icon, for recipes that make no item (enchants).
+local function SpellIcon(spell)
+  if not spell then return nil end
+  local texture = (C_Spell and C_Spell.GetSpellTexture and Try(C_Spell.GetSpellTexture, spell))
+    or (GetSpellTexture and Try(GetSpellTexture, spell))
+  if not texture and C_TradeSkillUI and C_TradeSkillUI.GetRecipeInfo then
+    local info = Try(C_TradeSkillUI.GetRecipeInfo, spell)
+    texture = info and info.icon
+  end
+  return ns.Plain(texture) and texture or nil
+end
+
+-- The icon of a step or a goal: its item's, else its recipe's.
+local function IconOf(t)
+  local spell = t.spell or (type(t.id) == "string" and tonumber(t.id:match("^recipe:(%d+)$"))) or nil
+  return (t.icon and Try(GetItemIcon, t.icon)) or (t.item and Try(GetItemIcon, t.item)) or SpellIcon(spell)
+    or (t.k == "rank" and [[Interface\Icons\INV_Misc_Book_09]]) or nil
+end
+
+local function IconText(item, t)
+  local texture = (item and Try(GetItemIcon, item)) or (t and IconOf(t))
   return texture and ("|T" .. texture .. ":16:16:0:0|t ") or ""
 end
 
@@ -749,7 +776,7 @@ local function GoalLabel(t, plan, inList)
   local have = plan and plan.profession and ns.profSkill and ns.profSkill[plan.profession]
   -- Already crafted: the whole line is grey.
   if t.made then
-    return IconText(t.icon) .. GREY .. (t.skill and (t.skill .. "  ") or "") .. tostring(t.name) .. "   made|r" .. ready
+    return IconText(t.icon, t) .. GREY .. (t.skill and (t.skill .. "  ") or "") .. tostring(t.name) .. "   made|r" .. ready
   end
   local name = QualityColor(t) .. tostring(t.name) .. "|r"
   local skill = ""
@@ -758,13 +785,13 @@ local function GoalLabel(t, plan, inList)
     if t.known then color = DIFF_COLOR[t.diff] or WHITE end
     skill = color .. t.skill .. "|r  "
   end
-  if t.known then return IconText(t.icon) .. skill .. name .. ready end
+  if t.known then return IconText(t.icon, t) .. skill .. name .. ready end
   local cost = ""
   if t.cost and t.cost ~= "" then
     local afford = CanAfford(t)
     cost = "   " .. (afford == true and GREEN or (afford == false and RED or GOLD)) .. t.cost .. "|r"
   end
-  return IconText(t.icon) .. skill .. name .. cost
+  return IconText(t.icon, t) .. skill .. name .. cost
 end
 
 -- Selects a recipe in the profession window, when that window is open on the same profession.
@@ -1491,8 +1518,7 @@ local function LayoutStep(row, i, step, current)
   end
   row.icon:SetSize(28, 28)
   row.icon:SetPoint("TOPLEFT", 24, -3)
-  row.icon:SetTexture((step.icon and Try(GetItemIcon, step.icon)) or (step.item and Try(GetItemIcon, step.item))
-    or QUESTION_MARK)
+  row.icon:SetTexture(IconOf(step) or QUESTION_MARK)
   if row.icon.SetDesaturated then row.icon:SetDesaturated(step.done and true or false) end
   row:SetAlpha(step.done and 0.6 or 1)
 
