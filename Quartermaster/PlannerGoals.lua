@@ -733,6 +733,7 @@ local function favorSteps(plan, key, first)
   for _, e in ipairs(plan.crates) do
     local short = (e.name:gsub("Waylaid Crate: ", ""))
     steps[#steps + 1] = { k = "fill", item = e.fill.item, icon = e.item, n = e.n * e.fill.n, cur = FAVOR, favor = plan.need,
+      crate = e.item, crates = e.n,
       title = ("Fill %d %s crate%s"):format(e.n, short, plural(e.n)),
       sub = ("With %d %s each%s"):format(e.fill.n, e.fill.name, e.n > 1 and (" (%d in all)"):format(e.n * e.fill.n) or "") }
   end
@@ -1819,6 +1820,10 @@ function G.PlanMulti(plan)
 
   -- Merchant's Favor: what all the patterns cost together, earned once.
   local steps, gold, earn, favorName = {}, 0, nil, "Merchant's Favor"
+  -- Errands are grouped by where they happen, and every craft comes after them, so no place is
+  -- visited twice: the goals' vendor buys and trainers, then the crates (fill, hand in), then
+  -- the patterns that cost the Favor (bought where it's earned), then the crafting.
+  local crateTrip, townLearns, favorLearns = {}, {}, {}
   local wanted = 0
   local repFaction, repStanding, rep
   for _, t in ipairs(goals) do
@@ -1865,7 +1870,7 @@ function G.PlanMulti(plan)
   end
   if wanted > P.Currency(key, FAVOR) then
     earn = G.PlanFavor(key, wanted, copy(carry.inv), market, plan.cache)
-    for _, st in ipairs(favorSteps(earn, key, first and not rep)) do steps[#steps + 1] = st end
+    for _, st in ipairs(favorSteps(earn, key, first and not rep)) do crateTrip[#crateTrip + 1] = st end
     gold = gold + earn.gold
     carry.inv = earn.inventory
     addRows(earn)
@@ -1889,6 +1894,13 @@ function G.PlanMulti(plan)
           else
             buys[k].n = buys[k].n + st.n
           end
+        elseif st.k == "learn" and st.near ~= "auctioneer" then
+          local forFavor = false
+          for _, o in ipairs(list(e.src.others)) do
+            if o.currency == FAVOR then forFavor = true end
+          end
+          local to = forFavor and favorLearns or townLearns
+          to[#to + 1] = st
         else
           body[#body + 1] = st
         end
@@ -1913,7 +1925,9 @@ function G.PlanMulti(plan)
     st.unit, st.at, st.guess = nil, nil, nil
     steps[#steps + 1] = st
   end
-  for _, st in ipairs(body) do steps[#steps + 1] = st end
+  for _, part in ipairs({ townLearns, crateTrip, favorLearns, body }) do
+    for _, st in ipairs(part) do steps[#steps + 1] = st end
+  end
 
   local mats = {}
   for _, entry in pairs(need) do mats[#mats + 1] = entry end

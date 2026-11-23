@@ -413,9 +413,15 @@ local function IsDone(v, i, step)
     local have, need = Progress(step)
     return have ~= nil and need ~= nil and have >= need
   elseif k == "fill" then
-    -- Filled once that much of the material has gone since the step came up, or (in case the
-    -- game doesn't work that way) once the Favor it was for is there.
-    if step.base and step.item and step.n and Count(step.item, true) <= step.base - step.n then return true end
+    -- Filled once the empty crates have gone (a filled one is another item), or that much of
+    -- the material has gone, counted from the most you've held (CheckSteps keeps count); or,
+    -- failing both, once the Favor it was for is there.
+    if step.crate and step.cratePeak and step.crateDrop and Count(step.crate, true) <= step.cratePeak - step.crateDrop then
+      return true
+    end
+    if step.item and step.peak and step.drop and step.drop > 0 and Count(step.item, true) <= step.peak - step.drop then
+      return true
+    end
     local info = step.cur and C_CurrencyInfo and C_CurrencyInfo.GetCurrencyInfo
       and Try(C_CurrencyInfo.GetCurrencyInfo, step.cur)
     return info ~= nil and step.favor ~= nil and (info.quantity or 0) >= step.favor
@@ -448,13 +454,22 @@ local function CheckSteps(v)
       changed = true
     end
   end
-  -- Crate fills count what's used from when they come up; fills in a row start together.
-  for i = first or (#v.steps + 1), #v.steps do
-    local step = v.steps[i]
-    if step.k ~= "fill" then break end
-    if not step.done and not step.base and step.item then
-      step.base = Count(step.item, true)
-      changed = true
+  -- Crate fills: remember the most empty crates and the most of the material you've held, so
+  -- what you buy for them after the plan came up doesn't hide what filling them used. Fills
+  -- that share a crate or a material count on from one another, in order.
+  local crateSum, matSum = {}, {}
+  for _, step in ipairs(v.steps) do
+    if step.k == "fill" and not step.done then
+      if step.crate then
+        step.cratePeak = math.max(step.cratePeak or 0, Count(step.crate, true))
+        crateSum[step.crate] = (crateSum[step.crate] or 0) + (step.crates or 1)
+        step.crateDrop = crateSum[step.crate]
+      end
+      if step.item then
+        step.peak = math.max(step.peak or 0, Count(step.item, true))
+        matSum[step.item] = (matSum[step.item] or 0) + (step.n or 0)
+        step.drop = matSum[step.item]
+      end
     end
   end
   for i, step in ipairs(v.steps) do
