@@ -1,7 +1,7 @@
 ## Interface: 16001
 ## Title: Quartermaster
 ## Notes: A profession companion. Works out the cheapest way to any profession goal (a skill level, a recipe, a gear upgrade) from your bags, bank, vendors, trainers and auction prices, and shows the steps beside your profession window. /qm shows or hides the plan.
-## Version: 1.0.0
+## Version: 1.0.1
 ## Category: Professions
 ## IconTexture: Interface\Icons\INV_Scroll_03
 ## SavedVariables: QuartermasterDB

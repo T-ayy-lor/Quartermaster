@@ -1770,8 +1770,11 @@ local function Build()
   -- Everything still to buy at the auction house, as one Auctionator shopping list.
   local okShop, shop = pcall(CreateFrame, "Button", nil, content, "SharedButtonSmallTemplate")
   if not okShop or not shop then shop = CreateFrame("Button", nil, content, "UIPanelButtonTemplate") end
-  shop:SetSize(96, 20)
-  shop:SetText("Shopping list")
+  shop:SetText("Generate Auctionator shopping list")
+  -- As wide as its words, with the template's padding.
+  local label = shop.GetFontString and shop:GetFontString()
+  local textWidth = label and label.GetStringWidth and label:GetStringWidth()
+  shop:SetSize((type(textWidth) == "number" and textWidth > 0) and math.ceil(textWidth) + 24 or 220, 20)
   shop:SetScript("OnClick", function() ns.PlanShoppingList() end)
   shop:SetScript("OnEnter", function(self)
     GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
