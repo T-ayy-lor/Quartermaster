@@ -134,15 +134,12 @@ local function delivery(plan, key, market)
     return put(step, place(row))
   end
 
-  -- When the gold on hand covers everything, buy it all in one trip. Otherwise buy in stages:
-  -- each stretch's materials right before it, so the gold on hand goes as far as it can.
+  -- Every vendor purchase goes up front, one step per item, so each vendor is one trip: also when
+  -- the gold on hand doesn't cover the plan (the summary says how much is short).
   -- Auction house buys aren't steps: they're in the materials list, where the plan window turns
   -- them into one shopping list to buy all at once at the start. Vendor buys are trips to a place.
-  local staged = plan.short > 0
-  if not staged then
-    for _, row in ipairs(plan.shopping) do
-      if row.source ~= "ah" then steps[#steps + 1] = buyStep(row, true) end
-    end
+  for _, row in ipairs(plan.shopping) do
+    if row.source ~= "ah" then steps[#steps + 1] = buyStep(row, true) end
   end
 
   local learnAt = {}
@@ -173,11 +170,6 @@ local function delivery(plan, key, market)
         put(step, place(l))
       end
       steps[#steps + 1] = step
-    end
-    if staged then
-      for _, row in ipairs(st.buys) do
-        if row.source ~= "ah" then steps[#steps + 1] = buyStep(row, index == 1) end
-      end
     end
     for _, m in ipairs(st.makes) do
       steps[#steps + 1] = { k = "make", title = ("Make %d %s"):format(m.n, m.name),

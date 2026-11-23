@@ -270,6 +270,18 @@ local function View()
   return plan and ViewOf(plan) or nil
 end
 
+-- True while the goal showing has a worked-out plan with a step still to do.
+local function InProgress()
+  local plan = active and Plans() and Plans()[active]
+  if not plan or plan.stub or not plan.selected then return false end
+  local ok, v = pcall(ViewOf, plan)
+  if not ok or not (v and v.ready) then return false end
+  for _, step in ipairs(v.steps or {}) do
+    if not step.done then return true end
+  end
+  return false
+end
+
 -- 12345 -> "1g 23s 45c"
 local function Money(copper)
   copper = math.floor((copper or 0) + 0.5)
@@ -654,9 +666,11 @@ local function SetActive(name)
   return true
 end
 
--- Asks for the goals showing to be worked out, or brought up to date.
-local function Want()
-  if active then ns.Planner.Want(active) end
+-- Asks for the goals showing to be worked out, or brought up to date. A plan you're part-way
+-- through is kept as it is (keep): buying its materials must not send it down another route.
+-- Only Refresh or picking a goal works it out again.
+local function Want(fresh)
+  if active then ns.Planner.Want(active, not fresh and InProgress() or false) end
 end
 
 function ns.PlanShowProfession(name)
@@ -839,7 +853,7 @@ function ns.PlanSelect(id)
     ns.MarkDirty("plan")
   end
   -- Its plan is worked out now, from what you have at this moment.
-  Want()
+  Want(true)
   ns.PlanCheck()
   return true
 end

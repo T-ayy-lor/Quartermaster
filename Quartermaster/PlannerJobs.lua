@@ -448,10 +448,12 @@ function Planner.Rebuild(profession)
 end
 
 -- Makes sure a profession's goals are worked out and up to date, and the picked goal planned.
-function Planner.Want(profession)
+-- keep: the picked goal's plan is under way, so it stays as it was worked out (what was the
+-- cheapest route when you started must not turn into another one after you've bought for it).
+function Planner.Want(profession, keep)
   local plan = profession and plans[profession]
   if not plan or plan.fixed then return end
-  if plan.stub or plan.version ~= version then
+  if plan.stub or (plan.version ~= version and not keep) then
     Planner.Rebuild(profession)
     return
   end
