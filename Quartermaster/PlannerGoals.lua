@@ -47,8 +47,7 @@ local function inZone(zone) return zone and (" in " .. zone) or "" end
 
 -- The profession's English name (the recipe data's), for the tables above.
 local function englishName(key, profession)
-  local c = P.Char(key)
-  local prof = c and c.professions and c.professions.list and c.professions.list[profession]
+  local prof = P.Prof(key, profession)
   local data = prof and prof.skillLine and ns.recipeData and ns.recipeData[prof.skillLine]
   return data and data.name or profession
 end
@@ -112,10 +111,11 @@ end
 
 -- The step for training a rank: done once the profession's cap is past where it was.
 local function rankStep(profession, rank)
+  local at = rank.who and (rank.who .. inZone(rank.zone)) or (P.A(profession) .. " trainer")
   local step = { k = "rank", profession = profession, cap = rank.cap,
-    title = ("Train %s %s"):format(rank.name, profession),
-    sub = ("At %s. It raises the cap past %d"):format(
-      rank.who and (rank.who .. inZone(rank.zone)) or ("a " .. profession .. " trainer"), rank.cap) }
+    title = rank.cap == 0 and ("Learn %s"):format(profession) or ("Train %s %s"):format(rank.name, profession),
+    sub = rank.cap == 0 and ("At %s. You haven't learned it yet; what it costs isn't counted"):format(at)
+      or ("At %s. It raises the cap past %d"):format(at, rank.cap) }
   return put(step, place(rank))
 end
 
@@ -173,7 +173,7 @@ local function delivery(plan, key, market)
         step.near = "auctioneer"
       else
         if l.unknownCost then
-          step.sub = "At a " .. plan.profession .. " trainer. What it costs isn't known until you open one"
+          step.sub = "At " .. P.A(plan.profession) .. " trainer. What it costs isn't known until you open one"
         else
           step.sub = at(l) .. ", " .. Money(l.cost)
         end
@@ -1239,7 +1239,7 @@ end
 -- profession.
 function G.Catalog(key, profession)
   local c = P.Char(key)
-  local prof = c and c.professions and c.professions.list and c.professions.list[profession]
+  local prof = P.Prof(key, profession)
   if not prof then return nil end
   local recorded = P.Recipes(key, profession) or {}
   local skill, cap = prof.skill or 0, prof.max or 0
@@ -1247,7 +1247,7 @@ function G.Catalog(key, profession)
   local english = englishName(key, profession)
   local gathering = GATHERING[english]
   local title = profession .. " goals"
-  local plan = { key = key, profession = profession, title = title, skill = skill, cap = cap,
+  local plan = { key = key, profession = profession, title = title, skill = skill, cap = cap, unlearned = prof.unlearned,
     gathering = gathering, levels = {}, plans = {}, items = {}, targets = {}, groups = {},
     fromDatabase = recorded.fromDatabase, cache = {} }
   local marks = checkpoints(skill, profession)
@@ -1334,6 +1334,16 @@ function G.Catalog(key, profession)
     ids[#ids + 1] = t.id
   end
   groups[#groups + 1] = { label = "Skill checkpoints", flat = true, ids = ids }
+
+  -- A recipe you don't know whose item needs a character level more than 5 above yours isn't
+  -- listed (the user, 2026-11-23). An item whose level isn't known stays.
+  local charLevel = P.Info(key).level or 0
+  local listed = {}
+  for _, e in ipairs(entries) do
+    local need = not e.known and e.item and P.ItemLevel(e.item) or nil
+    if not (need and need > charLevel + LEVEL_AHEAD) then listed[#listed + 1] = e end
+  end
+  entries = listed
 
   -- Recipes you know go in one group. The rest are grouped by where they come from.
   local bySource, order, tierOf, categoryOf = {}, {}, {}, {}
@@ -1475,20 +1485,9 @@ function G.Catalog(key, profession)
       sections = sections, ids = all, note = UPGRADE_NOTE })
   end
 
-  -- The goal showing first: the cap if it can be planned, else the first that can.
-  local capGoal = byId["skill:" .. cap]
-  if capGoal and not capGoal.no then
-    plan.selected = capGoal.id
-  else
-    for _, t in ipairs(targets) do
-      if not t.no then
-        plan.selected = t.id
-        break
-      end
-    end
-  end
-  -- Shown when no goal is picked (or none can be).
-  if skill >= cap and not plan.selected then
+  -- No goal is picked for you: nothing is worked out (no steps, no cost, no shopping list) until
+  -- you pick one. Shown until then:
+  if skill >= cap then
     plan.summary = ("%s is at its cap of %d. Train the next rank at a trainer to go further."):format(profession, cap)
   else
     plan.summary = "Pick a goal from the list above."
@@ -1715,7 +1714,7 @@ local function tail(plan, skillPlan, e, first, carry)
     local l = maker.learn
     gold = gold + l.cost
     steps[#steps + 1] = { k = "learn", spell = maker.spell, icon = maker.item, title = "Learn " .. maker.name,
-      sub = l.unknownCost and ("At a " .. plan.profession .. " trainer. What it costs isn't known until you open one")
+      sub = l.unknownCost and ("At " .. P.A(plan.profession) .. " trainer. What it costs isn't known until you open one")
         or ((l.who and (l.who .. ", ") or "") .. Money(l.cost)) }
   end
   local need, made, madeOrder = {}, {}, {}

@@ -87,6 +87,17 @@ end
 function P.Knows(key, spell)
   return key == ns.PlayerKey() and IsPlayerSpell and ns.Try(IsPlayerSpell, spell) and true or false
 end
+function P.LiveLevel(item)
+  local get = (C_Item and C_Item.GetItemInfo) or GetItemInfo
+  if not get then return nil end
+  local ok, _, _, _, _, minLevel = pcall(get, item)
+  return ok and ns.Plain(minLevel) and minLevel or nil
+end
+function P.LocalName(line)
+  local T = C_TradeSkillUI
+  local name = T and T.GetTradeSkillDisplayName and ns.Try(T.GetTradeSkillDisplayName, line)
+  return type(name) == "string" and name ~= "" and name or nil
+end
 function P.LiveName(item)
   local name = C_Item and C_Item.GetItemNameByID and ns.Try(C_Item.GetItemNameByID, item)
   return type(name) == "string" and name ~= "" and name or nil
@@ -302,8 +313,12 @@ function Planner.Plans()
       if not plans[name] then plans[name] = Stub(name) end
     end
     for name, plan in pairs(plans) do
-      if not list[name] and not plan.fixed then plans[name] = nil end
+      if not list[name] and not plan.fixed and not P.browse[name] then plans[name] = nil end
     end
+  end
+  -- Professions you haven't learned but asked to look at.
+  for name in pairs(P.browse) do
+    if not plans[name] then plans[name] = Stub(name) end
   end
   return plans
 end
@@ -430,8 +445,7 @@ end
 function Planner.Rebuild(profession)
   local plan = plans[profession]
   if plan and plan.fixed then return end
-  local c = ns.Char()
-  if not (c and c.professions and c.professions.list and c.professions.list[profession]) then return end
+  if not P.Prof(ns.PlayerKey(), profession) then return end
   local function updated()
     -- True: the goal list itself is new, so an open dropdown showing the old one is closed.
     if ns.PlanUpdated then ns.PlanUpdated(profession, true) end

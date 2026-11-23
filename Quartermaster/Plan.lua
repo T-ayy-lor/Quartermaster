@@ -1045,16 +1045,40 @@ local function GoalMenu(_, root, index)
   end
 end
 
--- The profession dropdown, above the goals: every profession that has goals.
+-- The profession dropdown, above the goals: your professions, then the ones you haven't learned,
+-- to see what one would cost to level.
 local function ProfessionMenu(_, root)
+  local key = ns.PlayerKey()
   for _, name in ipairs(PlanNames()) do
-    root:CreateRadio(name,
-      function() return active == name end,
-      function()
-        ns.PlanShowProfession(name)
-        return CloseDropdowns()
-      end, name)
+    if not ns.P.browse[name] or (ns.P.Prof(key, name) or {}).unlearned == nil then
+      root:CreateRadio(name,
+        function() return active == name end,
+        function()
+          ns.PlanShowProfession(name)
+          return CloseDropdowns()
+        end, name)
+    end
   end
+  local others = ns.P.Unlearned(key)
+  if #others > 0 and root.CreateButton then
+    local sub = root:CreateButton(GREY .. "Professions you haven't learned|r")
+    for _, o in ipairs(others) do
+      local name, line = o.name, o.line
+      sub:CreateRadio(name,
+        function() return active == name end,
+        function()
+          ns.PlanBrowse(name, line)
+          return CloseDropdowns()
+        end, name)
+    end
+  end
+end
+
+-- Shows the goals of a profession you haven't learned (worked out as if you'd just learned it).
+function ns.PlanBrowse(name, line)
+  ns.P.browse[name] = line
+  ns.Planner.Plans()
+  return ns.PlanShowProfession(name)
 end
 
 ----------------------------------------------------------------------
@@ -1333,15 +1357,13 @@ end
 -- separate "(temporary)" list without the counts, so that isn't used, and any left over from
 -- an earlier version is removed.)
 local LIST_NAME = "Quartermaster"
-function ns.PlanShoppingList()
-  local items = ns.PlanShoppingItems()
-  if #items == 0 then
-    ns.Print("nothing left to buy at the auction house for this plan.")
-    return false
-  end
+local listMade -- what the list last made held ("item:n,item:n"), so it's only remade when that changes
+
+-- Makes (or replaces) the "Quartermaster" list in Auctionator. Quiet: says nothing in chat.
+local function MakeList(items, quiet)
   local api = Auctionator and Auctionator.API and Auctionator.API.v1
   if not (api and api.CreateShoppingList) then
-    ns.Print("Auctionator isn't loaded, so there's no shopping list to make.")
+    if not quiet then ns.Print("Auctionator isn't loaded, so there's no shopping list to make.") end
     return false
   end
   local strings = {}
@@ -1355,9 +1377,12 @@ function ns.PlanShoppingList()
     strings[#strings + 1] = str or ('"' .. it.name .. '"')
   end
   if not pcall(api.CreateShoppingList, "Quartermaster", LIST_NAME, strings) then
-    ns.Print("Auctionator couldn't make the shopping list.")
+    if not quiet then ns.Print("Auctionator couldn't make the shopping list.") end
     return false
   end
+  local sig = {}
+  for _, it in ipairs(items) do sig[#sig + 1] = it.item .. ":" .. it.n end
+  listMade = table.concat(sig, ",")
   local manager = Auctionator.Shopping and Auctionator.Shopping.ListManager
   pcall(function()
     -- Lists from earlier versions of this addon.
@@ -1369,8 +1394,33 @@ function ns.PlanShoppingList()
       if type(name) == "string" and name:find("^Quartermaster: ") then manager:Delete(name) end
     end
   end)
+  return true
+end
+
+-- Keeps Auctionator's "Quartermaster" list in step with the goal picked, by itself: made when a
+-- goal's plan is worked out, remade when what's still to buy changes. Nothing when no goal is
+-- picked or nothing is left to buy there.
+local function AutoList(v)
+  if not (v and v.ready and v.plan and v.plan.selected and HasAuctionator()) then return end
+  local items = ns.PlanShoppingItems()
+  if #items == 0 then return end
+  local sig = {}
+  for _, it in ipairs(items) do sig[#sig + 1] = it.item .. ":" .. it.n end
+  if table.concat(sig, ",") == listMade then return end
+  MakeList(items, true)
+end
+ns.PlanAutoList = AutoList
+
+function ns.PlanShoppingList()
+  local items = ns.PlanShoppingItems()
+  if #items == 0 then
+    ns.Print("nothing left to buy at the auction house for this plan.")
+    return false
+  end
+  if not MakeList(items, false) then return false end
   ns.Print(('Auctionator shopping list "%s" has %d item%s, with how many of each you need.'):format(
     LIST_NAME, #items, #items == 1 and "" or "s"))
+  local manager = Auctionator.Shopping and Auctionator.Shopping.ListManager
   local open = (AuctionHouseFrame and AuctionHouseFrame.IsShown and AuctionHouseFrame:IsShown())
     or (AuctionFrame and AuctionFrame.IsShown and AuctionFrame:IsShown())
   if open then
@@ -1777,6 +1827,7 @@ function Refresh()
     HideQuietly()
     return
   end
+  pcall(AutoList, v)
   local plan = v.plan
   if window.SetTitle then window:SetTitle(v.title or plan.title or "Plan") end
   -- The profession dropdown always shows which profession this is.

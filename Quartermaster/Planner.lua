@@ -52,6 +52,12 @@ local function trialOf(inv)
 end
 
 -- 12345 -> "1g 23s 45c"
+-- "a Leatherworking trainer", "an Alchemy trainer".
+function P.A(word)
+  word = tostring(word)
+  return (word:find("^[AEIOUaeiou]") and "an " or "a ") .. word
+end
+
 function P.Money(copper)
   if copper == nil then return "?" end
   copper = floor(copper + 0.5)
@@ -170,6 +176,15 @@ function P.Item(item)
   return (item and (items[item] or items[tostring(item)])) or {}
 end
 
+-- The character level an item needs: recorded, or asked from the game (PlannerJobs.lua), or nil.
+function P.ItemLevel(item)
+  local req = P.Item(item).req
+  if type(req) == "number" and req > 0 then return req end
+  local live = P.LiveLevel(item)
+  return (type(live) == "number" and live > 0) and live or nil
+end
+function P.LiveLevel() return nil end
+
 -- An item's name: recorded, or asked from the game, or "item 123".
 function P.LiveName() return nil end
 function P.ItemName(item)
@@ -245,9 +260,11 @@ P.RANK_BAND = 25
 -- profession this character can use: the nearest, or without a position the one seen last.
 function P.Ranks(key, profession, cap, target)
   local out, at = {}, cap
+  -- A profession not learned yet: the first rank is learning it.
+  local fresh = cap == 0 and (P.Prof(key, profession) or {}).unlearned
   for _, rank in ipairs(P.RANKS) do
     if rank[1] > at and at < target then
-      if at > 0 then out[#out + 1] = { name = rank[2], cap = at } end
+      if at > 0 or fresh then out[#out + 1] = { name = rank[2], cap = at } end
       at = rank[1]
     end
   end
@@ -475,10 +492,47 @@ end
 -- Recipes
 ----------------------------------------------------------------------
 
--- The recipe data for a profession (Recipes.lua): { [spell] = { n, i, d, s, p, m } }.
-function P.RecipeDB(key, profession)
+-- Professions this character hasn't learned that the plan window was asked to show: name -> the
+-- skill line in Recipes.lua. In memory only.
+P.browse = {}
+
+-- A profession's record: skill, max (the cap), skillLine. For one the character hasn't learned
+-- but is looking at, a stand-in: skill 1 (where learning it starts), cap 0, unlearned = true.
+function P.Prof(key, profession)
   local c = P.Char(key)
   local prof = c and c.professions and c.professions.list and c.professions.list[profession]
+  if prof then return prof end
+  local line = P.browse[profession]
+  if line and ns.recipeData and ns.recipeData[line] then
+    return { skill = 1, max = 0, skillLine = line, unlearned = true }
+  end
+  return nil
+end
+
+-- A profession's name as the game shows it, from its skill line (PlannerJobs.lua asks the game).
+function P.LocalName() return nil end
+
+-- Every profession in the built-in recipe data this character hasn't learned:
+-- { { name, line } }, by name.
+function P.Unlearned(key)
+  local c = P.Char(key)
+  local names, lines = {}, {}
+  for name, prof in pairs(list(c and c.professions and c.professions.list)) do
+    names[name] = true
+    if type(prof) == "table" and prof.skillLine then lines[prof.skillLine] = true end
+  end
+  local out = {}
+  for line, d in pairs(ns.recipeData or {}) do
+    local name = P.LocalName(line) or d.name
+    if not lines[line] and not names[name] and not names[d.name] then out[#out + 1] = { name = name, line = line } end
+  end
+  table.sort(out, function(a, b) return a.name < b.name end)
+  return out
+end
+
+-- The recipe data for a profession (Recipes.lua): { [spell] = { n, i, d, s, p, m } }.
+function P.RecipeDB(key, profession)
+  local prof = P.Prof(key, profession)
   local data = prof and prof.skillLine and ns.recipeData and ns.recipeData[prof.skillLine]
   if not data then
     for _, d in pairs(ns.recipeData or {}) do
@@ -526,7 +580,9 @@ function P.Recipes(key, profession)
   end
   local db = P.RecipeDB(key, profession)
   if not next(db) then return nil end
-  local known = c.knownRecipes and c.knownRecipes.list and c.knownRecipes.list[profession]
+  local fresh = (P.Prof(key, profession) or {}).unlearned
+  local auto = (ns.recipeSources and ns.recipeSources.auto) or {}
+  local known = not fresh and c.knownRecipes and c.knownRecipes.list and c.knownRecipes.list[profession]
   local ids
   if known then
     ids = {}
@@ -537,7 +593,10 @@ function P.Recipes(key, profession)
     local reagents = {}
     for i = 1, #list(ref.m), 2 do reagents[#reagents + 1] = { id = ref.m[i], n = ref.m[i + 1] } end
     local knows
-    if ids then knows = ids[spell] or false else knows = P.Knows(key, spell) and true or false end
+    if fresh then
+      -- Not learned yet: what learning the profession teaches with it counts as known.
+      knows = auto[spell] and true or false
+    elseif ids then knows = ids[spell] or false else knows = P.Knows(key, spell) and true or false end
     out[spell] = { name = ref.n or ("recipe " .. spell), item = ref.i, min = 1, known = knows, reagents = reagents }
   end
   return { savedAt = known and c.knownRecipes.savedAt or nil, recipes = out, fromDatabase = true }
@@ -1036,8 +1095,7 @@ end
 -- Returns nil and a reason when it can't be planned at all.
 function P.PlanSkill(key, profession, target, opts)
   opts = opts or {}
-  local c = P.Char(key)
-  local prof = c and c.professions and c.professions.list and c.professions.list[profession]
+  local prof = P.Prof(key, profession)
   if not prof then return nil, key .. " doesn't have " .. profession end
   local skill, cap = prof.skill or 0, prof.max or 0
   local warnings = {}
@@ -1046,8 +1104,13 @@ function P.PlanSkill(key, profession, target, opts)
   local ranks, rankAt = P.Ranks(key, profession, cap, target), {}
   for _, rank in ipairs(ranks) do
     rankAt[rank.cap] = true
-    warnings[#warnings + 1] = ("Going past %d needs %s %s, trained at a %s trainer. What that costs isn't counted.")
-      :format(rank.cap, rank.name, profession, profession)
+    if rank.cap == 0 then
+      warnings[#warnings + 1] = ("You haven't learned %s: the plan starts with learning it at %s trainer. "
+        .. "What that costs isn't counted."):format(profession, P.A(profession))
+    else
+      warnings[#warnings + 1] = ("Going past %d needs %s %s, trained at %s trainer. What that costs isn't counted.")
+        :format(rank.cap, rank.name, profession, P.A(profession))
+    end
   end
   local market = opts.market or P.Market(key)
   local recipes, skipped = opts.recipes, opts.skipped
