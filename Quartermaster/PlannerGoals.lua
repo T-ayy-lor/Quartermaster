@@ -104,6 +104,12 @@ local function stationStep(item)
     sub = "Beside a campfire, then craft next to it. It's used up when placed" }
 end
 
+-- The step for a tool or station no price or recipe is known for.
+local function getStep(item)
+  return { k = "buy", item = item, icon = item, n = 1, title = "Get 1 " .. P.ItemName(item),
+    sub = "This recipe needs it. No price is known, and you don't know how to make it" }
+end
+
 -- The step for training a rank: done once the profession's cap is past where it was.
 local function rankStep(profession, rank)
   local step = { k = "rank", profession = profession, cap = rank.cap,
@@ -150,7 +156,7 @@ local function delivery(plan, key, market)
 
   local learnAt = {}
   for _, l in ipairs(plan.learns) do
-    if not learnAt[l.spell] then learnAt[l.spell] = l end
+    if not l.tool and not learnAt[l.spell] then learnAt[l.spell] = l end
   end
   local ranks, nextRank = list(plan.ranks), 1
   for index, st in ipairs(plan.stretches) do
@@ -159,10 +165,8 @@ local function delivery(plan, key, market)
       steps[#steps + 1] = rankStep(plan.profession, ranks[nextRank])
       nextRank = nextRank + 1
     end
-    local l = learnAt[st.spell]
-    learnAt[st.spell] = nil
-    if l then
-      local step = { k = "learn", title = "Learn " .. l.name, icon = st.item, spell = l.spell }
+    local function learnStep(l, icon)
+      local step = { k = "learn", title = "Learn " .. l.name, icon = icon, spell = l.spell }
       if l.how == "ah" then
         step.sub = "Buy the pattern at the auction house (it's on your shopping list), about " .. Money(l.cost)
         put(step, place(withWho(ah, "Auction house")))
@@ -175,12 +179,20 @@ local function delivery(plan, key, market)
         end
         put(step, place(l))
       end
-      steps[#steps + 1] = step
+      return step
     end
+    local l = learnAt[st.spell]
+    learnAt[st.spell] = nil
+    if l then steps[#steps + 1] = learnStep(l, st.item) end
+    -- The recipe of a tool these crafts need, learned first.
+    for _, pre in ipairs(st.pre or {}) do steps[#steps + 1] = learnStep(pre, pre.icon) end
     for _, m in ipairs(st.makes) do
       steps[#steps + 1] = { k = "make", title = ("Make %d %s"):format(m.n, m.name),
         sub = "From " .. table.concat(#m.from > 0 and m.from or { "what you have" }, ", "),
         icon = m.item, spell = m.spell, n = m.n }
+    end
+    for _, item in ipairs(st.missing or {}) do
+      if item ~= st.station then steps[#steps + 1] = getStep(item) end
     end
     if st.station then steps[#steps + 1] = stationStep(st.station) end
     local about = st.low >= 1 and "" or "about "
@@ -1687,10 +1699,25 @@ local function tail(plan, skillPlan, e, first, carry)
     if not sim:acquire(reagent[1], reagent[2], sim.inv, ops) then short[#short + 1] = reagent end
   end
   -- A camp station it's made beside, unless the plan already has one by now.
-  local placed = (carry and carry.placed) or (run and run.placed) or {}
-  local station = P.Station(key, plan.profession, e.spell)
-  if station and placed[station] then station = nil end
-  if station and not sim:acquire(station, 1, sim.inv, ops) then short[#short + 1] = { station, 1 } end
+  -- So does a tool (a Runed Silver Rod), which is kept.
+  local station
+  sim.placed = copy((carry and carry.placed) or (run and run.placed) or {})
+  for _, need in ipairs(P.Needs(key, plan.profession, e.spell) or {}) do
+    if not need[2] and not sim.placed[need[1]] then station = need[1] end
+  end
+  local _, _, missing = sim:equip({ needs = P.Needs(key, plan.profession, e.spell) }, sim.inv, ops, true,
+    skillPlan.to or plan.skill or 0)
+  for _, item in ipairs(missing or {}) do
+    if item ~= station then short[#short + 1] = { item, 1 } end
+  end
+  -- A tool's own recipe, learned first when that's how the tool is had.
+  for _, maker in ipairs(sim.toolLearns) do
+    local l = maker.learn
+    gold = gold + l.cost
+    steps[#steps + 1] = { k = "learn", spell = maker.spell, icon = maker.item, title = "Learn " .. maker.name,
+      sub = l.unknownCost and ("At a " .. plan.profession .. " trainer. What it costs isn't known until you open one")
+        or ((l.who and (l.who .. ", ") or "") .. Money(l.cost)) }
+  end
   local need, made, madeOrder = {}, {}, {}
   -- The goal's own vendor buys go first, before any trip for crates or reputation, so town is
   -- left once with everything bought.
@@ -1744,7 +1771,7 @@ local function tail(plan, skillPlan, e, first, carry)
   steps[#steps + 1] = { k = "make", spell = e.spell, n = 1, icon = e.item, title = "Craft " .. e.name,
     sub = carry and "One of your goals" or "The goal of this plan" }
   if carry then
-    if station then carry.placed[station] = true end
+    carry.placed = sim.placed
     -- What's left, and what's now been learned and made, for the next goal.
     if e.item then sim.inv[e.item] = (sim.inv[e.item] or 0) + (e.makes or 1) end
     sim.learned[e.spell] = true

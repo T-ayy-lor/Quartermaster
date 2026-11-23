@@ -403,8 +403,12 @@ function P.TrainerOffers(key, profession)
       for _, s in ipairs(list(t.services)) do
         if not profession or s.skill == profession then
           local offer = { npc = npc, trainer = t.name, cost = s.cost or 0, skill = s.skillRank or 0,
-            level = s.level or 0, item = s.item }
-          if s.name and (not out[s.name] or offer.cost < out[s.name].cost) then out[s.name] = offer end
+            level = s.level or 0, item = s.item, seen = t.savedAt or 0 }
+          -- Cheapest wins; at the same fee, the trainer opened most recently.
+          local old = s.name and out[s.name]
+          if s.name and (not old or offer.cost < old.cost or (offer.cost == old.cost and offer.seen > old.seen)) then
+            out[s.name] = offer
+          end
         end
       end
     end
@@ -559,19 +563,50 @@ P.STATIONS = {
 local TANNING = {}
 for _, spell in ipairs({ 1255087,1255085,1255086,1255084,1255083,1255082,1255081,1255080,1255078,1255079,1255077,1255076,1255075,1255071,1255070,1255068,1255069,1255067,1255066,1255065,1255064,1255063,1255062,1255061,1255060,1255011,1255009,1255010,1255008,1255007,1255005,1255006,1255004,1255003,1255001,1255002,1255000,23399,3778,22711,10619,10621,10630,19047,10647,10632,10650,19050 }) do TANNING[spell] = true end
 
--- The station item a recipe needs, or nil. What the profession window recorded wins.
-function P.Station(key, profession, spell)
+-- Things towns have, which a recipe may name but nobody has to bring.
+local FIXTURES = { ["Anvil"] = true, ["Forge"] = true, ["Black Anvil"] = true, ["Black Forge"] = true,
+  ["Cooking Fire"] = true }
+
+-- The item with this name: something a recipe makes, or an item on record. The lowest ID wins.
+local byName
+function P.ItemByName(name)
+  if not byName then
+    byName = {}
+    local function note(n, item)
+      if type(n) == "string" and type(item) == "number" and (not byName[n] or item < byName[n]) then byName[n] = item end
+    end
+    for _, d in pairs(ns.recipeData or {}) do
+      for _, r in pairs(d.r or {}) do note(r.n, r.i) end
+    end
+    for item, it in pairs(ns.db and ns.db.account and ns.db.account.items or {}) do
+      if type(it) == "table" then note(it.name, item) end
+    end
+  end
+  return byName[name]
+end
+function P.ForgetNames() byName = nil end
+
+-- What a recipe has to be made with or beside, beyond its materials: { { item, keep } }, or nil.
+-- keep = true is a tool you hold on to (a Runed Silver Rod); false is a camp station, used up
+-- when placed. What the profession window recorded wins over the built-in list.
+function P.Needs(key, profession, spell)
   local c = P.Char(key)
   local seen = c and c.recipes and c.recipes[profession]
   local r = seen and type(seen.recipes) == "table" and seen.recipes[spell]
+  local out = {}
   if type(r) == "table" and type(r.needs) == "table" then
     for _, name in ipairs(r.needs) do
-      if P.STATIONS[name] then return P.STATIONS[name] end
+      if P.STATIONS[name] then
+        out[#out + 1] = { P.STATIONS[name], false }
+      elseif not FIXTURES[name] then
+        local item = P.ItemByName(name)
+        if item then out[#out + 1] = { item, true } end
+      end
     end
-    return nil
+  elseif profession == "Leatherworking" and TANNING[spell] then
+    out[1] = { P.STATIONS["Tanning Rack"], false }
   end
-  if profession == "Leatherworking" and TANNING[spell] then return P.STATIONS["Tanning Rack"] end
-  return nil
+  return #out > 0 and out or nil
 end
 
 ----------------------------------------------------------------------
@@ -751,7 +786,7 @@ function P.BuildRecipes(key, profession, includeAHPatterns, market)
             spell = spell, name = r.name or ref.n or ("recipe " .. spell), item = r.item,
             makes = max(1, r.min or 1), reagents = reagents, difficulty = ref.d, required = required,
             known = known, learn = learn, points = max(1, r.skillUps or 1),
-            station = P.Station(key, profession, spell),
+            needs = P.Needs(key, profession, spell),
           }
         end
       end
@@ -777,7 +812,8 @@ function P.NewRun(recipes, market, owned, weight, noMake, prepaid)
     inv = copy(owned),
     weight = weight,               -- how much owned materials are "worth saving" (0 = free)
     learned = {}, makers = {},     -- makers: item -> recipes that produce it
-    placed = {},                   -- camp stations already got for this plan
+    placed = {},                   -- tools and camp stations already got for this plan
+    toolLearns = {},               -- recipes learned to make a tool, in order
     commits = {},                  -- one per skill point gained
     whole = false,                 -- true: sub-crafts are made in whole numbers
   }, Run)
@@ -848,6 +884,50 @@ function Run:acquire(item, n, inv, ops, depth, stack)
   return gold + bestGold, soft
 end
 
+-- Gets the tools and camp stations a recipe needs that the plan hasn't got yet: one of each,
+-- once. A tool you hold costs nothing and stays; a station is used up. Returns gold, weighted
+-- cost, and the items that can't be had (no price, no known recipe), if any.
+function Run:equip(recipe, inv, ops, commit, skill)
+  local gold, soft, missing = 0, 0, nil
+  for _, need in ipairs(recipe.needs or {}) do
+    local item, keep = need[1], need[2]
+    if not self.placed[item] then
+      if commit then self.placed[item] = true end
+      if not (keep and (inv[item] or 0) >= 1) then
+        local g, s = self:acquire(item, 1, inv, ops)
+        if not g then
+          -- Its own recipe isn't known yet: learn that first, if it can be learned by now.
+          for _, maker in ipairs(self.makers[item] or {}) do
+            local l = maker.learn
+            if not g and not self.learned[maker.spell] and l and l.skill <= (skill or 0) and maker.required <= (skill or 0) then
+              self.learned[maker.spell] = true
+              g, s = self:acquire(item, 1, inv, ops)
+              if g then
+                g = g + l.cost
+                if commit then
+                  self.toolLearns[#self.toolLearns + 1] = maker
+                else
+                  self.learned[maker.spell] = nil
+                end
+              else
+                self.learned[maker.spell] = nil
+              end
+            end
+          end
+        end
+        if g then
+          gold, soft = gold + g, soft + s
+          if keep then inv[item] = (inv[item] or 0) + 1 end
+        else
+          missing = missing or {}
+          missing[#missing + 1] = item
+        end
+      end
+    end
+  end
+  return gold, soft, missing
+end
+
 -- One expected skill point from this recipe at this skill: 1/chance crafts.
 -- Returns gold, weighted cost and crafts, or nil.
 function Run:craftOnce(recipe, skill, inv, ops)
@@ -873,10 +953,9 @@ function Run:score(recipe, skill, target)
     if not self.prepaid[recipe.spell] then total = total + recipe.learn.cost end
   end
   local inv = trialOf(self.inv)
-  -- A camp station it's made beside: one, the first time a recipe needs it.
-  if recipe.station and not self.placed[recipe.station] then
-    local g, soft = self:acquire(recipe.station, 1, inv, {})
-    if not g then return nil end
+  -- A tool or camp station it needs: one, the first time a recipe needs it.
+  if recipe.needs then
+    local g, soft = self:equip(recipe, inv, {}, false, skill)
     total = total + g + soft
   end
   local best, s = nil, skill
@@ -920,14 +999,19 @@ function Run:walk(skill, target)
       learn = recipe.learn
     end
     local stationGold = 0
-    if recipe.station and not self.placed[recipe.station] then
-      self.placed[recipe.station] = true
-      stationGold = self:acquire(recipe.station, 1, self.inv, ops) or 0
+    local learnedBefore = #self.toolLearns
+    if recipe.needs then stationGold = self:equip(recipe, self.inv, ops, true, skill) end
+    -- Recipes learned just now to make a tool: their fee is counted with the learning, not here.
+    local pre
+    for i = learnedBefore + 1, #self.toolLearns do
+      pre = pre or {}
+      pre[#pre + 1] = self.toolLearns[i]
+      stationGold = stationGold - self.toolLearns[i].learn.cost
     end
     local g, _, crafts = self:craftOnce(recipe, skill, self.inv, ops)
     g = g + stationGold
     self.commits[#self.commits + 1] = { recipe = recipe, skill = skill, crafts = crafts, gold = g,
-      chance = chance(skill, recipe.difficulty), ops = ops, learn = learn }
+      chance = chance(skill, recipe.difficulty), ops = ops, learn = learn, pre = pre }
     skill = skill + recipe.points
     current = recipe
   end
@@ -936,7 +1020,10 @@ end
 
 function Run:gold()
   local total = 0
-  for _, c in ipairs(self.commits) do total = total + c.gold + (c.learn and c.learn.cost or 0) end
+  for _, c in ipairs(self.commits) do
+    total = total + c.gold + (c.learn and c.learn.cost or 0)
+    for _, maker in ipairs(c.pre or {}) do total = total + maker.learn.cost end
+  end
   return total
 end
 
@@ -1026,6 +1113,17 @@ function P.PlanSkill(key, profession, target, opts)
         to = commit.skill + r.points, expected = commit.crafts, high = commit.chance, low = commit.chance,
         color = P.Color(commit.skill, r.difficulty), learn = commit.learn and commit.learn.cost or 0 }
     end
+    -- Recipes learned to make a tool these crafts need.
+    for _, maker in ipairs(commit.pre or {}) do
+      local l = copy(maker.learn)
+      l.spell, l.name, l.at, l.tool, l.icon = maker.spell, maker.name, commit.skill, true, maker.item
+      learns[#learns + 1] = l
+      local st = stretches[#stretches]
+      st.pre = st.pre or {}
+      st.pre[#st.pre + 1] = l
+      st.learn = st.learn + l.cost
+      spent = spent + l.cost
+    end
     spent = spent + commit.gold + (commit.learn and commit.learn.cost or 0)
     if spent <= budget + EPS then affordableTo = commit.skill + r.points end
   end
@@ -1042,10 +1140,13 @@ function P.PlanSkill(key, profession, target, opts)
     st.crafts = whole(st.expected)
     local ops = {}
     -- The camp station these crafts are made beside: one, before the first stretch that needs it.
-    if r.station and not final.placed[r.station] then
-      final.placed[r.station] = true
-      final:acquire(r.station, 1, final.inv, ops)
-      st.station = r.station
+    if r.needs then
+      for _, need in ipairs(r.needs) do
+        if not need[2] and not final.placed[need[1]] then st.station = need[1] end
+      end
+      for _, l in ipairs(st.pre or {}) do final.learned[l.spell] = true end
+      local _, _, missing = final:equip(r, final.inv, ops, true, st.from)
+      st.missing = missing
     end
     for _, reagent in ipairs(r.reagents) do
       final:acquire(reagent[1], reagent[2] * st.crafts, final.inv, ops)
