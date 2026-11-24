@@ -91,7 +91,15 @@ function P.LiveLevel(item)
   local get = (C_Item and C_Item.GetItemInfo) or GetItemInfo
   if not get then return nil end
   local ok, _, _, _, _, minLevel = pcall(get, item)
-  return ok and ns.Plain(minLevel) and minLevel or nil
+  if ok and ns.Plain(minLevel) and minLevel then return minLevel end
+  -- Not in the game's item cache yet: Questie's item data, when it's installed.
+  if type(QuestieLoader) == "table" and QuestieLoader.ImportModule then
+    local got, level = pcall(function()
+      return QuestieLoader:ImportModule("QuestieDB").QueryItemSingle(item, "requiredLevel")
+    end)
+    if got and type(level) == "number" then return level end
+  end
+  return nil
 end
 function P.LocalName(line)
   local T = C_TradeSkillUI

@@ -19,7 +19,6 @@ local function PlanTooltip(tip)
     tip:AddLine(title, 1, 1, 1)
     if total > 0 then tip:AddLine(done .. " of " .. total .. " steps done", 0.4, 1, 0.4) end
     tip:AddLine("Click to show or hide the plan.", 1, 1, 1, true)
-    tip:AddLine("It also opens with its profession window.", 0.7, 0.7, 0.7, true)
   else
     tip:AddLine("This character has no professions to plan for yet.", 1, 1, 1, true)
   end

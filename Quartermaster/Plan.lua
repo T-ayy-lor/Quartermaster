@@ -30,10 +30,9 @@
 --       near = "vendor" | "mailbox" | "banker" | "auctioneer" | "crates" goes to the nearest one of those
 --       from where you're standing (worked out when the arrow is set)
 --
--- The window appears beside your profession window whenever the plan's profession is open
--- (a Leatherworking plan with Leatherworking), and goes away when that window closes. You can
--- drag it from there; the next time it opens it's beside the profession window again. The
--- minimap button and /qm show or hide it anywhere.
+-- The window opens and closes only with the minimap button, /qm and its close button: no game
+-- window ever brings it up, moves it or takes it away. Open or closed, and where you dragged it,
+-- are kept between sessions. Opening a profession window shows that profession's goals in it.
 -- It's built from the game's own window parts (the portrait window, inset, scroll frame, tick
 -- box and small button WoW Forever uses). Rows follow the old CraftMatch panel: an icon, a
 -- title, a colored detail line, and progress on the right.
@@ -53,7 +52,6 @@ local GetItemCount = (C_Item and C_Item.GetItemCount) or GetItemCount
 local GetItemIcon = (C_Item and C_Item.GetItemIconByID) or GetItemIcon
 
 local window, rows = nil, {}
-local dismissed = false -- you closed it while the profession window was open
 
 local GREY, WHITE, GREEN, RED, GOLD = "|cff808080", "|cffffffff", "|cff40ff40", "|cffff4040", "|cffffd100"
 -- The detail line's color says what kind of step it is.
@@ -1303,66 +1301,24 @@ end
 
 ns.PlanOpenProfession = OpenProfession
 
--- How far past the profession window's right edge its own pieces stick out (the profession
--- tabs down its right side), so the plan sits beside them and not on top.
-local function HostOverhang(host)
-  local right = Try(host.GetRight, host)
-  if not right then return 0 end
-  local scale = host:GetEffectiveScale() or 1
-  local top, bottom = host:GetTop() or 0, host:GetBottom() or 0
-  local most = right
-  local function scan(frame, depth)
-    for _, child in ipairs({ frame:GetChildren() }) do
-      -- Some of the game's frames are off limits to addons; touching them is an error.
-      local forbidden = child.IsForbidden and child:IsForbidden()
-      if not forbidden and child ~= window and child.IsShown and child:IsShown() then
-        local r, t, b = child:GetRight(), child:GetTop(), child:GetBottom()
-        if r and t and b then
-          local k = (child:GetEffectiveScale() or scale) / scale
-          r, t, b = r * k, t * k, b * k
-          -- Only pieces level with the window count, not tooltips far above or below.
-          if t <= top + 5 and b >= bottom - 5 and r > most and r < right + 150 then most = r end
-        end
-        if depth < 3 then scan(child, depth + 1) end
-      end
-    end
-  end
-  pcall(scan, host, 1)
-  return most - right
-end
-
--- The game windows the plan comes up beside (which steps each serves: StepAt, further down).
-local VENUES = {
-  auction  = { frames = { "AuctionHouseFrame", "AuctionFrame" } },
-  merchant = { frames = { "MerchantFrame" } },
-  trainer  = { frames = { "ClassTrainerFrame" } },
-  bank     = { frames = { "BankFrame" } },
-  mail     = { frames = { "MailFrame" } },
-}
-local venue -- the kind opened last and still open, or nil
-
--- A venue's window (whichever kind this client has), when it's open.
-local function VenueWindow(kind)
-  for _, name in ipairs(VENUES[kind] and VENUES[kind].frames or {}) do
-    local frame = _G[name]
-    if frame and frame.IsShown and frame:IsShown() then return frame end
-  end
-end
-
--- Where the window goes: beside the vendor, trainer, bank, mailbox or auction house you have
--- open; else beside the profession window, as tall as it is; else the right of the screen.
+-- Where the window goes: where you last dragged it, else the right of the screen. It never
+-- moves by itself.
 local function Place()
-  local host = (venue and VenueWindow(venue)) or Host()
   window:ClearAllPoints()
-  if host and host.IsShown and host:IsShown() then
-    local gap = HostOverhang(host) + 2
-    window:SetWidth(WIDTH)
-    window:SetPoint("TOPLEFT", host, "TOPRIGHT", gap, 0)
-    window:SetPoint("BOTTOMLEFT", host, "BOTTOMRIGHT", gap, 0)
+  window:SetSize(WIDTH, HEIGHT)
+  local ui = ns.db and ns.db.account.ui
+  local pos = ui and ui.planPos
+  if type(pos) == "table" and type(pos.x) == "number" and type(pos.y) == "number" then
+    window:SetPoint(pos.point or "TOPLEFT", UIParent, pos.point or "TOPLEFT", pos.x, pos.y)
   else
-    window:SetSize(WIDTH, HEIGHT)
     window:SetPoint("RIGHT", UIParent, "RIGHT", -120, 40)
   end
+end
+
+-- Open or closed, kept between sessions: it stays as you left it.
+local function SaveOpen(open)
+  local ui = ns.db and ns.db.account.ui
+  if ui then ui.planOpen = open and true or nil end
 end
 
 local function RowTooltip(self)
@@ -1835,8 +1791,6 @@ local function Build()
   if window then return window end
   local name = "QuartermasterPlanFrame"
   local frame = CreateFrame("Frame", name, UIParent, "PortraitFrameTemplate")
-  -- Escape closes it, like the game's own windows.
-  if UISpecialFrames then table.insert(UISpecialFrames, name) end
   frame:SetSize(WIDTH, HEIGHT)
   frame:SetFrameStrata("MEDIUM")
   frame:SetToplevel(true)
@@ -1845,14 +1799,19 @@ local function Build()
   frame:EnableMouse(true)
   frame:RegisterForDrag("LeftButton")
   frame:SetScript("OnDragStart", function(self) self:StartMoving() end)
-  -- Dragged, it stays where you put it until it next opens. Where it was dragged to is never
-  -- remembered: it opens beside the profession window, or at the right of the screen.
-  frame:SetScript("OnDragStop", function(self) self:StopMovingOrSizing() end)
-  -- Closing it yourself keeps it closed until the profession window is opened again, or you
-  -- ask for it.
-  frame:SetScript("OnHide", function()
-    if not frame.hiddenByCode then dismissed = true end
+  -- Dragged, it stays where you put it, also after a /reload.
+  frame:SetScript("OnDragStop", function(self)
+    self:StopMovingOrSizing()
+    local ui = ns.db and ns.db.account.ui
+    local left, top = self:GetLeft(), self:GetTop()
+    if ui and left and top then
+      local scale = self:GetEffectiveScale() / UIParent:GetEffectiveScale()
+      ui.planPos = { point = "TOPLEFT", x = ns.Round(left * scale, 1), y = ns.Round(top * scale - UIParent:GetHeight(), 1) }
+    end
   end)
+  -- Only the minimap button, /qm and the close button open or close it.
+  frame:SetScript("OnHide", function() if not frame.hiddenByCode then SaveOpen(false) end end)
+  frame:SetScript("OnShow", function() SaveOpen(true) end)
 
   -- Two dropdowns at the top, the game's own (as its settings windows use): which profession,
   -- then which goal.
@@ -1996,22 +1955,10 @@ local function Build()
   return frame
 end
 
--- Hides the window without it counting as you closing it.
-local function HideQuietly()
-  if window and window:IsShown() then
-    window.hiddenByCode = true
-    window:Hide()
-    window.hiddenByCode = nil
-  end
-end
-
 function Refresh()
   if not window or not window:IsShown() then return end
   local v = View()
-  if not v then
-    HideQuietly()
-    return
-  end
+  if not v then return end
   pcall(AutoList, v)
   local plan = v.plan
   if window.SetTitle then window:SetTitle(v.title or plan.title or "Plan") end
@@ -2162,89 +2109,16 @@ function Refresh()
     .. (behind and "   |cffff8040skill-ups behind: Refresh|r" or "")))
 end
 
--- When the profession window closes, the plan goes with it, however it was opened.
+-- The plan shows the goals of the profession whose window you open (it never opens, closes or
+-- moves the plan window: only the minimap button, /qm and the close button do).
 local hooked = {}
 local lastOpen -- the profession the profession window was last seen showing
 local function OnHostHidden()
-  dismissed = false
   lastOpen = nil
-  -- A plan you opened yourself stays until you close it; it only moves.
-  if window and window:IsShown() and not window.auto then
-    Place()
-  else
-    HideQuietly()
-  end
-end
--- A "Plan" button on the profession window itself, top right, level with the skill bar, to
--- show or hide the plan. It's built on the game's own small button and drawn above the
--- profession window's own pieces so nothing can cover it. To mark it as an addon's and not the
--- game's, it's tinted blue and carries the addon's scroll icon.
-local function MakeToggle(host)
-  if ns.planToggle or not host then return end
-  local ok, b = pcall(CreateFrame, "Button", "QuartermasterPlanToggle", host, "SharedButtonSmallTemplate")
-  if not ok or not b then b = CreateFrame("Button", "QuartermasterPlanToggle", host, "UIPanelButtonTemplate") end
-  ns.planToggle = b
-  b:SetSize(64, 22)
-  b:SetText("Plan")
-  b:SetPoint("TOPRIGHT", host, "TOPRIGHT", -24, -38)
-  -- The game's button art is red; grey it and tint it blue. The pieces differ between button
-  -- templates, so every one that exists is tinted.
-  local function tint(texture)
-    if texture and texture.SetVertexColor then
-      if texture.SetDesaturated then texture:SetDesaturated(true) end
-      texture:SetVertexColor(0.35, 0.65, 1)
-    end
-  end
-  pcall(function()
-    for _, key in ipairs({ "Left", "Middle", "Right", "Center" }) do tint(b[key]) end
-    for _, get in ipairs({ "GetNormalTexture", "GetPushedTexture", "GetDisabledTexture" }) do
-      if b[get] then tint(b[get](b)) end
-    end
-  end)
-  -- The addon's icon at the left, with the label moved over to make room.
-  pcall(function()
-    local icon = b:CreateTexture(nil, "OVERLAY")
-    icon:SetSize(14, 14)
-    icon:SetPoint("LEFT", b, "LEFT", 8, 0)
-    icon:SetTexture([[Interface\Icons\INV_Scroll_03]])
-    b.icon = icon
-    local label = b.GetFontString and b:GetFontString()
-    if label then
-      label:ClearAllPoints()
-      label:SetPoint("LEFT", icon, "RIGHT", 4, 0)
-      if label.SetTextColor then label:SetTextColor(1, 1, 1) end
-    end
-  end)
-  b:SetFrameStrata("HIGH")
-  b:SetFrameLevel(50)
-  b:SetScript("OnClick", function() ns.PlanToggleFromProfession() end)
-  b:SetScript("OnEnter", function(self)
-    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-    GameTooltip:AddLine("Quartermaster plan")
-    GameTooltip:AddLine("Click to show or hide your plan for this profession.", 1, 1, 1, true)
-    GameTooltip:Show()
-  end)
-  b:SetScript("OnLeave", function() GameTooltip:Hide() end)
-  b:Show()
-  -- Where it ended up, kept in the saved data so a problem can be worked out from there.
-  C_Timer.After(1, function()
-    ns.Run("planToggle", function()
-      if not ns.db then return end
-      ns.db.account.ui.toggle = {
-        host = host.GetName and host:GetName() or "?", hostShown = host.IsShown and host:IsShown() and true or false,
-        hostWidth = ns.Round(host.GetWidth and host:GetWidth(), 0), hostHeight = ns.Round(host.GetHeight and host:GetHeight(), 0),
-        hostRight = ns.Round(host.GetRight and host:GetRight(), 0), hostTop = ns.Round(host.GetTop and host:GetTop(), 0),
-        left = ns.Round(b.GetLeft and b:GetLeft(), 0), top = ns.Round(b.GetTop and b:GetTop(), 0),
-        visible = b.IsVisible and b:IsVisible() and true or false,
-        template = b.template or nil, at = time(),
-      }
-    end)
-  end)
 end
 
 local function HookHost()
   local host = Host()
-  if host and not ns.planToggle then ns.Run("planToggle", MakeToggle, host) end
   if host and not hooked[host] and host.HookScript then
     hooked[host] = true
     pcall(host.HookScript, host, "OnHide", OnHostHidden)
@@ -2256,15 +2130,12 @@ local function HookHost()
   end
 end
 
--- Shows the window. `auto` means a game window brought it up (the profession window, or with
--- `byVenue` a vendor, trainer, bank, mailbox or the auction house), so it leaves with it.
-local function Show(auto, byVenue)
+local function Show()
   if not Plan() then return false end
   HookHost()
+  local fresh = not window
   Build()
-  window.auto = auto and true or nil
-  window.byVenue = (auto and byVenue) and true or nil
-  Place()
+  if fresh or not window:IsShown() then Place() end
   window:Show()
   -- Each time it comes up, the goals are brought up to date with what you have now.
   Want()
@@ -2273,8 +2144,7 @@ local function Show(auto, byVenue)
 end
 
 function ns.ShowPlan()
-  dismissed = false
-  return Show(false)
+  return Show()
 end
 
 function ns.TogglePlan()
@@ -2285,8 +2155,7 @@ function ns.TogglePlan()
   return ns.ShowPlan()
 end
 
--- Brings up the plan of whichever profession's window is open, and takes it away when that
--- window closes or shows a profession with no plan.
+-- When the profession window opens or switches profession, the plan shows that one's goals.
 local followTries = 0
 local FollowProfession
 function FollowProfession()
@@ -2296,7 +2165,7 @@ function FollowProfession()
   local open = OpenProfession()
   if hostShown and not open then
     -- The window is open but the game hasn't said which profession it is yet. That takes a
-    -- moment some of the time; look again shortly, without hiding anything.
+    -- moment some of the time; look again shortly.
     if followTries < 20 then
       followTries = followTries + 1
       C_Timer.After(0.25, function() ns.Run("planFollow", FollowProfession) end)
@@ -2305,43 +2174,18 @@ function FollowProfession()
   end
   followTries = 0
   if not open then
-    if window and window:IsShown() and window.auto then HideQuietly() end
+    lastOpen = nil
     return
   end
   if open ~= lastOpen then
-    -- The profession window opened, or switched to another profession: show that one's goals.
     lastOpen = open
-    dismissed = false
-    if SetActive(open) then
-      if window and window:IsShown() then
-        Place()
-        Want()
-        Refresh()
-      else
-        Show(true)
-      end
-    elseif window and window:IsShown() and window.auto then
-      HideQuietly()
+    if SetActive(open) and window and window:IsShown() then
+      Want()
+      Refresh()
     end
-  elseif not dismissed and not (window and window:IsShown()) and SetActive(open) then
-    -- Same profession window as before, and the plan isn't up though it should be.
-    Show(true)
   end
   -- Otherwise the profession window hasn't changed: whatever you're browsing in the plan
   -- (another profession's goals, say) stays as it is.
-end
-
--- The button on the profession window: shows or hides the plan.
-function ns.PlanToggleFromProfession()
-  if window and window:IsShown() then
-    window:Hide()
-    return false
-  end
-  local open = OpenProfession()
-  if open then SetActive(open) end
-  if ns.ShowPlan() then return true end
-  ns.Print("this character has no professions to plan for yet.")
-  return false
 end
 
 -- Works the goals that are showing out again, from what you have right now.
@@ -2359,105 +2203,6 @@ function ns.PlanUpdated(profession, rebuilt)
     if rebuilt then CloseDropdowns() end
   end
   Check()
-end
-
--- At a vendor, trainer, bank, mailbox or the auction house: the plan you last looked at comes
--- up beside that window only when that very window serves a step still to do, and goes away
--- with it. A plan that's already up moves beside such a window and stays. A window with nothing
--- for the plan (a class or pet trainer, Beast Training, a vendor selling none of it) is left alone.
-local function NpcName()
-  local name = Try(UnitName, "npc")
-  return ns.Plain(name) and name or nil
-end
-
--- What a "Learn X" step teaches.
-local function LearnName(step)
-  return type(step.title) == "string" and step.title:match("^Learn (.+)$") or nil
-end
-
--- Does the open vendor sell this item, or (by name) the pattern for this recipe?
-local function MerchantSells(item, recipe)
-  for i = 1, Try(GetMerchantNumItems) or 0 do
-    local id = (GetMerchantItemID and Try(GetMerchantItemID, i)) or ns.ItemID(GetMerchantItemLink and Try(GetMerchantItemLink, i))
-    if item and id == item then return true end
-    if recipe then
-      local info = C_MerchantFrame and C_MerchantFrame.GetItemInfo and Try(C_MerchantFrame.GetItemInfo, i)
-      local name = (info and info.name) or (GetMerchantItemInfo and Try(GetMerchantItemInfo, i))
-      if ns.Plain(name) and type(name) == "string" and (name == recipe or name:sub(-#recipe - 2) == ": " .. recipe) then
-        return true
-      end
-    end
-  end
-  return false
-end
-
--- Does the open trainer teach this profession, or this recipe by name? Never a class or pet
--- trainer, and never a trainer window with no NPC behind it (Beast Training).
-local function TrainerTeaches(profession, recipe)
-  if not NpcName() then return false end
-  if IsTradeskillTrainer and not Try(IsTradeskillTrainer) then return false end
-  for i = 1, Try(GetNumTrainerServices) or 0 do
-    local name = Try(GetTrainerServiceInfo, i)
-    if recipe and ns.Plain(name) and name == recipe then return true end
-    if profession then
-      local skill = Try(GetTrainerServiceSkillReq, i)
-      local line = GetTrainerServiceSkillLine and Try(GetTrainerServiceSkillLine, i)
-      if (ns.Plain(skill) and skill == profession) or (ns.Plain(line) and line == profession) then return true end
-    end
-  end
-  return false
-end
-
-local function StepAt(kind, step)
-  local k = step.k
-  if kind == "auction" then return k == "auction" or step.near == "auctioneer" end
-  if kind == "bank" then return k == "bank" end
-  if kind == "mail" then return k == "collect" end
-  if step.near == "auctioneer" then return false end
-  local npc = NpcName()
-  local named = npc and step.where == npc
-  if kind == "merchant" then
-    if k == "buy" then return named or MerchantSells(step.item) end
-    if k == "learn" then return named or MerchantSells(nil, LearnName(step)) end
-  elseif kind == "trainer" then
-    if k == "rank" then return TrainerTeaches(step.profession or active) end
-    if k == "learn" then return TrainerTeaches(nil, LearnName(step)) or (named and TrainerTeaches(active)) end
-  end
-  return false
-end
-
-local function VenueWanted(kind)
-  local v = View()
-  for _, step in ipairs(v and v.steps or {}) do
-    if not step.done and StepAt(kind, step) then return true end
-  end
-  return false
-end
-
-local function OnVenueOpen(kind)
-  -- Only once you've looked at a plan on this character, and only at a window the plan has
-  -- something to do at.
-  local c = ns.Char()
-  if not (c and c.planShown) or not Plan() or not VenueWanted(kind) then return end
-  venue = kind
-  if window and window:IsShown() then
-    Place()
-  else
-    Show(true, true)
-  end
-end
-
-local function OnVenueClosed(kind)
-  if venue ~= kind then return end
-  venue = nil
-  if not (window and window:IsShown()) then return end
-  local host = Host()
-  if window.auto and window.byVenue and not (host and host.IsShown and host:IsShown()) then
-    HideQuietly()
-  else
-    window.byVenue = nil
-    Place()
-  end
 end
 
 ----------------------------------------------------------------------
@@ -2485,7 +2230,17 @@ end)
 ns.On("PLAYER_LOGIN", function()
   -- Window positions saved by earlier versions aren't used any more.
   local ui = ns.db and ns.db.account.ui
-  if ui then ui.plan, ui.planClosed, ui.planLayout = nil, nil, nil end
+  if ui then ui.plan, ui.planClosed, ui.planLayout, ui.toggle = nil, nil, nil, nil end
+end)
+-- Open when you last left it open: it comes back as it was, after a /reload or logging in.
+local restored = false
+ns.On("PLAYER_ENTERING_WORLD", function()
+  if restored then return end
+  restored = true
+  local ui = ns.db and ns.db.account.ui
+  if ui and ui.planOpen then
+    C_Timer.After(1, function() ns.Run("planRestore", function() if not (window and window:IsShown()) then Show() end end) end)
+  end
 end)
 
 -- The plan follows the profession window in and out of combat alike (it's an ordinary window),
@@ -2504,17 +2259,6 @@ ns.PlanQueueFollow = QueueFollow
 for _, event in ipairs({ "PLAYERBANKSLOTS_CHANGED", "BANKFRAME_OPENED", "BANKFRAME_CLOSED" }) do
   ns.On(event, function() ForgetViews() if Plan() then ns.Later("planCheck", 1, Check) end end)
 end
--- The game's window shows a moment after its event, so the plan waits before going beside it.
-for kind, events in pairs({ auction = { "AUCTION_HOUSE_SHOW", "AUCTION_HOUSE_CLOSED" },
-  merchant = { "MERCHANT_SHOW", "MERCHANT_CLOSED" }, trainer = { "TRAINER_SHOW", "TRAINER_CLOSED" },
-  bank = { "BANKFRAME_OPENED", "BANKFRAME_CLOSED" }, mail = { "MAIL_SHOW", "MAIL_CLOSED" } }) do
-  ns.On(events[1], function() C_Timer.After(0.3, function() ns.Run("planVenue", OnVenueOpen, kind) end) end)
-  ns.On(events[2], function() ns.Run("planVenue", OnVenueClosed, kind) end)
-end
--- A trainer's list can arrive after its window: look again when it does.
-ns.On("TRAINER_UPDATE", function()
-  if venue ~= "trainer" and VenueWindow("trainer") then ns.Run("planVenue", OnVenueOpen, "trainer") end
-end)
 for _, event in ipairs({ "TRADE_SKILL_SHOW", "TRADE_SKILL_DATA_SOURCE_CHANGED", "TRADE_SKILL_LIST_UPDATE",
   "TRADE_SKILL_DETAILS_UPDATE" }) do
   ns.On(event, QueueFollow)

@@ -851,6 +851,12 @@ function P.BuildRecipes(key, profession, includeAHPatterns, market)
             end
           end
         end
+        -- A pattern the character's level can't use yet (Pattern: Truefaith Gloves needs 25).
+        local patternLevel = ok and learn and learn.item and P.ItemLevel(learn.item)
+        if patternLevel and patternLevel > level then
+          skip("needs a higher character level")
+          ok = false
+        end
         if ok then
           recipes[#recipes + 1] = {
             spell = spell, name = r.name or ref.n or ("recipe " .. spell), item = r.item,

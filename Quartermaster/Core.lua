@@ -1,7 +1,6 @@
 -- Quartermaster: a profession companion. It records what your characters have, know and can
 -- reach (this file and the recorder files: facts only), works out the cheapest plan for any
--- profession goal from that (the Planner files), and shows it beside your profession window
--- (Plan.lua).
+-- profession goal from that (the Planner files), and shows it in the plan window (Plan.lua).
 --
 -- Everything is kept in QuartermasterDB (account-wide):
 --   QuartermasterDB.chars["First-Surname"]   one table per character, one sub-table per section
@@ -13,7 +12,7 @@
 
 local ADDON, ns = ...
 
-ns.VERSION = "1.0.5"
+ns.VERSION = "1.0.6"
 ns.SCHEMA = 1
 
 local unpackSafe = unpack or table.unpack

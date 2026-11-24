@@ -2,10 +2,9 @@
 
 A profession companion for World of Warcraft: Forever. Pick a goal (a skill level, a recipe, a
 gear upgrade) and it works out the cheapest way there from what you own, vendor and trainer
-prices, and auction prices. The steps appear beside your profession window and tick themselves
-off as you go.
+prices, and auction prices. The steps tick themselves off as you go.
 
-**Version 1.0.5.**
+**Version 1.0.6.**
 
 ## Requirements
 
@@ -21,7 +20,8 @@ Download `Quartermaster-<version>.zip` from the
 
 ## Use
 
-1. Open a profession window. The plan opens beside it.
+1. Click the minimap button or type `/qm` to open the plan. It stays open, where you put it, until
+   you close it (also across a `/reload`). Opening a profession window shows that profession's goals.
 2. Pick a goal from the dropdown. Nothing is worked out until you do. Another dropdown appears
    under it to add a second goal, and so on: they're planned together, so nothing is bought twice.
 3. At the auction house, buy what's missing from Auctionator's "Quartermaster" shopping list. It's
@@ -29,7 +29,8 @@ Download `Quartermaster-<version>.zip` from the
 4. Work through the steps. Click a crafting step to craft it; click any other step to point
    the way.
 
-`/qm` or the minimap button opens and closes the window. **Refresh** works the plan out again.
+`/qm`, the minimap button or the window's close button open and close it. **Refresh** works the
+plan out again.
 
 Curious about a profession you don't have? Pick it under "Professions you haven't learned" in
 the profession dropdown to see what any skill level would cost, starting from learning it.
