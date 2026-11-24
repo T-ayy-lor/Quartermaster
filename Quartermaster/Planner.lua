@@ -232,6 +232,7 @@ P.Better = better
 -- nil. The price is an estimate (four times what a vendor pays for the item); opening the
 -- vendor replaces it with the real one.
 function P.VendorGuess() return nil end
+function P.NearestSeller() return nil end
 
 -- Where an NPC that hasn't been recorded stands, from another addon's data: a list of
 -- { map, x, y, name }, or nil. (PlannerJobs.lua asks Questie when it's installed.)
@@ -695,6 +696,16 @@ function P.Market(key)
             v.spot = { map = near.map, x = near.x, y = near.y, zone = near.zone }
           end
         end
+      end
+      if not unit and ns.vendorGoods and ns.vendorGoods[item] then
+        -- An ordinary vendor good (thread, bleach, dyes, vials) no vendor of yours here has been
+        -- opened for: its built-in price, at the nearest vendor that sells it (Questie's data).
+        -- Cheaper than the auction house or the same: the vendor.
+        local near = P.NearestSeller(key, item, true)
+        v = { unit = ns.vendorGoods[item], name = near and near.name or nil, builtin = true,
+          spot = near and { map = near.map, x = near.x, y = near.y, zone = near.zone } or nil }
+        m.vendors[item] = v
+        unit, source = v.unit, "vendor"
       end
       local p = P.Price(item)
       if p and (not unit or p < unit) then unit, source = p, "ah" end
@@ -1319,7 +1330,7 @@ function P.PlanSkill(key, profession, target, opts)
     local e, n = row, row.n
     if e.source == "vendor" then
       local v = market.vendors[e.item]
-      local npc = v.spot or P.Npc(v.npc)
+      local npc = v.spot or (v.npc and P.Npc(v.npc)) or {}
       row.npc, row.who, row.map, row.x, row.y = v.npc, v.name, npc.map, npc.x, npc.y
       row.zone = npc.subzone or npc.zone
       if v.guess then

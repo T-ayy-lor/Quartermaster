@@ -603,7 +603,7 @@ local function opRows(sim, allOps, market, warnings)
   for _, row in ipairs(buyRows) do
     if row.source == "vendor" then
       local v = market.vendors[row.item]
-      local npc = v.spot or P.Npc(v.npc)
+      local npc = v.spot or (v.npc and P.Npc(v.npc)) or {}
       row.who, row.map, row.x, row.y, row.zone = v.name, npc.map, npc.x, npc.y, npc.subzone or npc.zone
       row.guess = v.guess
     else
@@ -1737,15 +1737,15 @@ local function tail(plan, skillPlan, e, first, carry)
       -- Auction house buys are in the materials list, bought with everything else at the start.
       if source == "vendor" then
         local v = market.vendors[item]
-        local npc = v.spot or P.Npc(v.npc)
+        local npc = v.spot or (v.npc and P.Npc(v.npc)) or {}
         local step = { k = "buy", item = item, icon = item, n = n, title = ("Buy %d %s"):format(n, P.ItemName(item)),
-          sub = tostring(v.name) .. inZone(npc.zone and (npc.subzone or npc.zone)) .. ", "
+          sub = (v.name or "a vendor") .. inZone(npc.zone and (npc.subzone or npc.zone)) .. ", "
             .. (v.guess and "about " or "") .. Money(n * unit) .. (v.guess and " (estimate)" or "") }
         if first and not earn and not rep and not carry then step.target = ((owned[item] or {}).total or 0) + n end
         -- So the same purchase can be folded into one step: with an earlier trip to the same
         -- vendor (G.FoldBuys), or across several goals.
         step.unit, step.guess = unit, v.guess
-        step.at = tostring(v.name) .. inZone(npc.zone and (npc.subzone or npc.zone))
+        step.at = (v.name or "a vendor") .. inZone(npc.zone and (npc.subzone or npc.zone))
         trips[#trips + 1] = put(step, place({ map = npc.map, x = npc.x, y = npc.y, who = v.name }))
       end
     elseif op[1] == "use" then

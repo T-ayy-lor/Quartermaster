@@ -237,11 +237,16 @@ local function Crafted(item)
   return crafted[item] or false
 end
 local sellers = {} -- item -> { npc ids } or false
-function P.VendorGuess(key, item)
+local everySeller = {} -- the same, for goods known to be ordinary (ns.vendorGoods)
+-- The nearest vendor of your faction that sells an item, from Questie's data: { name, map, x, y,
+-- zone }, or nil. Only for ordinary goods (20 or more vendors, nothing a recipe makes) unless
+-- `known` says it is one.
+function P.NearestSeller(key, item, known)
   if key ~= ns.PlayerKey() then return nil end
   -- Without Questie there's nothing to ask (and nothing is remembered, in case it loads later).
   if not (type(QuestieLoader) == "table" and QuestieLoader.ImportModule) then return nil end
-  local list = sellers[item]
+  local cache = known and everySeller or sellers
+  local list = cache[item]
   if list == nil then
     list = false
     do
@@ -249,7 +254,7 @@ function P.VendorGuess(key, item)
         local db = QuestieLoader:ImportModule("QuestieDB")
         local ids = db.QueryItemSingle(item, "vendors")
         if type(ids) ~= "table" then return nil end
-        if #ids < COMMON_AT or Crafted(item) then return nil end
+        if not known and (#ids < COMMON_AT or Crafted(item)) then return nil end
         local mine = (P.Info(key).faction or ""):sub(1, 1) -- "A" or "H"
         local found = {}
         -- Every one of them, so the nearest (a capital city's trade supplier, say) is among them.
@@ -263,12 +268,9 @@ function P.VendorGuess(key, item)
       end)
       if ok and out then list = out end
     end
-    sellers[item] = list
+    cache[item] = list
   end
   if not list then return nil end
-  local sell = P.Item(item).sell
-  if not sell and C_Item and C_Item.GetItemInfo then sell = select(11, C_Item.GetItemInfo(item)) end
-  if type(sell) ~= "number" or sell <= 0 then return nil end
   local here, best = P.Here(), nil
   for _, id in ipairs(list) do
     for _, spot in ipairs(P.NpcPlaces(id) or {}) do
@@ -277,8 +279,19 @@ function P.VendorGuess(key, item)
   end
   if not best then return nil end
   local info = C_Map and C_Map.GetMapInfo and ns.Try(C_Map.GetMapInfo, best.map)
-  return { unit = sell * 4, name = best.name or "a vendor", map = best.map, x = best.x, y = best.y,
+  return { name = best.name or "a vendor", map = best.map, x = best.x, y = best.y,
     zone = info and info.name or nil }
+end
+
+-- The same, with an estimated price (4x what a vendor pays for it), for ordinary goods with no
+-- price known at all.
+function P.VendorGuess(key, item)
+  local sell = P.Item(item).sell
+  if not sell and C_Item and C_Item.GetItemInfo then sell = select(11, C_Item.GetItemInfo(item)) end
+  if type(sell) ~= "number" or sell <= 0 then return nil end
+  local spot = P.NearestSeller(key, item)
+  if spot then spot.unit = sell * 4 end
+  return spot
 end
 
 ----------------------------------------------------------------------

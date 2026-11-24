@@ -13,7 +13,7 @@
 
 local ADDON, ns = ...
 
-ns.VERSION = "1.0.4"
+ns.VERSION = "1.0.5"
 ns.SCHEMA = 1
 
 local unpackSafe = unpack or table.unpack
