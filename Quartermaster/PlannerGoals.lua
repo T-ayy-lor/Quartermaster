@@ -434,8 +434,7 @@ local function recipeSource(ctx, spell, name, ref)
     if label == "" then label = "?" end
     local vendor = names[npc] or "a vendor"
     return done(locate({ how = "vendor", gold = gold, others = others, who = vendor, confirmed = true, label = label,
-      lines = { ("Sold by %s for %s. You haven't opened this vendor yet, so the place isn't recorded.")
-        :format(vendor, label) } }, { npc }, names))
+      lines = { ("Sold by %s for %s."):format(vendor, label) } }, { npc }, names))
   end
 
   -- 4. Learned with the profession itself.
@@ -1108,21 +1107,22 @@ end
 -- The catalog: every goal of a profession
 ----------------------------------------------------------------------
 
--- Skill levels worth aiming for: where the next rank can be trained, and the top of each rank.
+-- Skill levels worth aiming for: the ones that earn a Legacy point (Forever's achievements for
+-- reaching 150, 225 and 300 in a profession: Journeyman, Expert and Artisan).
+G.LEGACY = { 150, 225, 300 }
 local function checkpoints(skill, profession)
   local out = {}
-  for i, rank in ipairs(RANKS) do
-    local top, name = rank[1], rank[2]
-    local nextRank = RANKS[i + 1] and RANKS[i + 1][2]
-    if nextRank and top - BAND > 0 then
-      out[#out + 1] = { skill = top - BAND, name = ("%s %d: %s can be trained"):format(profession, top - BAND, nextRank),
-        lines = { ("From here a trainer can teach %s, which raises the cap past %d."):format(nextRank, top),
-          "This is Classic's rule; Forever hasn't confirmed it." } }
+  for _, at in ipairs(G.LEGACY) do
+    local name
+    for _, rank in ipairs(RANKS) do
+      if rank[1] == at then name = rank[2] end
     end
-    local lines = { ("The top of %s."):format(name) }
-    if top == 150 then lines[#lines + 1] = "Reaching 150 earns a Legacy point." end
-    out[#out + 1] = { skill = top, name = ("%s %d: top of %s%s"):format(profession, top, name,
-      top == 150 and " (Legacy point)" or ""), lines = lines }
+    if name then
+      out[#out + 1] = { skill = at, name = ("%s %d: top of %s (Legacy point)"):format(profession, at, name),
+        lines = { ("The top of %s. Reaching %d earns a Legacy point."):format(name, at) } }
+    else
+      out[#out + 1] = { skill = at, name = ("%s %d"):format(profession, at), lines = { "A skill level to plan to." } }
+    end
   end
   local ahead = {}
   for _, m in ipairs(out) do
@@ -1159,15 +1159,15 @@ end
 local function sourceGroup(known, src)
   if known then return 0, "", "Recipes you know", "known" end
   local how, sure, who = src.how, src.confirmed, src.who or "?"
-  if how == "trainer" and sure then return 1, who, "Trainer: " .. who, "trainer" end
-  if how == "vendor" and sure then
+  -- Every trainer of a profession teaches the same recipes: one list.
+  if how == "trainer" then return 1, "", "Trainers", "trainer" end
+  if how == "vendor" then
     local others = src.others or {}
-    if #others > 0 then return 3, who, tostring(others[1].name) .. ": " .. who, "currency" end
-    return 2, who, "Vendor: " .. who, "vendor"
+    if sure and #others > 0 then return 3, who, tostring(others[1].name) .. ": " .. who, "currency" end
+    -- Every vendor that sells a pattern for gold: one list, a heading per vendor.
+    return 2, "", "World vendors", "vendor"
   end
   if how == "ah" then return 4, "", "Auction house", "ah" end
-  if how == "trainer" then return 5, "", "Trainers you haven't opened", "trainer" end
-  if how == "vendor" then return 6, "", "Vendors you haven't opened", "vendor" end
   if how == "quest" then return 7, "", "Quest rewards", "quest" end
   if how == "drop" then return 8, "", "World drops", "drop" end
   if how == "auto" then return 9, "", "Learned with the profession", "auto" end
@@ -1209,6 +1209,31 @@ end
 
 -- Splits a group under the profession window's own headings, in the window's order. Recipes
 -- whose heading has no recorded name go under "Other".
+-- Splits the vendors' list into one heading per vendor, by name; each one's recipes by skill.
+local function vendorSections(ids, vendorOf, byId)
+  local found, order = {}, {}
+  for _, id in ipairs(ids) do
+    local who = vendorOf[id] or "A vendor"
+    if not found[who] then
+      found[who] = { label = who, ids = {} }
+      order[#order + 1] = who
+    end
+    table.insert(found[who].ids, id)
+  end
+  table.sort(order)
+  local out = {}
+  for _, who in ipairs(order) do
+    table.sort(found[who].ids, function(a, b)
+      local sa, sb = byId[a].skill or 0, byId[b].skill or 0
+      if sa ~= sb then return sa < sb end
+      if byId[a].name ~= byId[b].name then return byId[a].name < byId[b].name end
+      return a < b
+    end)
+    out[#out + 1] = found[who]
+  end
+  return out
+end
+
 local function categorySections(ids, categoryOf, categories, byId)
   local found, order = {}, {}
   for _, id in ipairs(ids) do
@@ -1349,7 +1374,7 @@ function G.Catalog(key, profession)
   entries = listed
 
   -- Recipes you know go in one group. The rest are grouped by where they come from.
-  local bySource, order, tierOf, categoryOf = {}, {}, {}, {}
+  local bySource, order, tierOf, categoryOf, vendorOf = {}, {}, {}, {}, {}
   local categories = list(recorded.categories)
   plan.entries = {}
   for _, e in ipairs(entries) do
@@ -1418,6 +1443,7 @@ function G.Catalog(key, profession)
     local item = e.item and P.Item(e.item) or {}
     tierOf[id] = { item.req or 0, e.skill or 0, SLOT_NAMES[item.loc] or "Other" }
     categoryOf[id] = e.category
+    vendorOf[id] = src.who
   end
 
   table.sort(order)
@@ -1433,6 +1459,8 @@ function G.Catalog(key, profession)
     local sections
     if g.kind == "currency" then
       sections = tierSections(g.ids, tierOf, byId)
+    elseif g.kind == "vendor" then
+      sections = vendorSections(g.ids, vendorOf, byId)
     elseif next(categories) and (g.kind == "known" or BY_CATEGORY[english]) then
       -- Under the profession window's own headings ("Stamina Food", "Agility Food"...).
       sections = categorySections(g.ids, categoryOf, categories, byId)

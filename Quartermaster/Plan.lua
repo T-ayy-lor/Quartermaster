@@ -1758,7 +1758,7 @@ local function LayoutMat(row, mat)
   if mat.each then
     row.step.note = (mat.guess and "About " or "") .. Money(mat.each) .. " each at "
       .. (mat.where == "auction house" and "the auction house" or tostring(mat.where or "a vendor"))
-      .. (mat.guess and " (an estimate: you haven't opened this vendor yet)" or "")
+      .. (mat.guess and " (an estimate)" or "")
   end
   -- What your other characters could mail over: "(+12 on Ana Brightwood)".
   if mat.also then row.step.note = (row.step.note and (row.step.note .. "  ") or "") .. "(" .. mat.also .. ")" end

@@ -1387,8 +1387,7 @@ function P.PlanSkill(key, profession, target, opts)
       row.zone = npc.subzone or npc.zone
       if v.guess then
         row.guess = true
-        warnings[#warnings + 1] = ("%s: the price is an estimate. You haven't opened %s yet; opening it records "
-          .. "the real price."):format(row.name, tostring(v.name or "that vendor"))
+        warnings[#warnings + 1] = ("%s: the price is an estimate (the game's data has no price for it)."):format(row.name)
       end
       if v.stock ~= nil and v.stock < n then
         warnings[#warnings + 1] = ("%s only had %d %s in stock; it restocks over time."):format(
@@ -1427,8 +1426,8 @@ function P.PlanSkill(key, profession, target, opts)
       end
     end
     if learn.unknownCost then
-      warnings[#warnings + 1] = ("%s: taught by a trainer you haven't opened (Classic's data). What it costs "
-        .. "isn't counted until you open one."):format(learn.name)
+      warnings[#warnings + 1] = ("%s: taught by trainers (Classic's data). Trainer fees aren't in the game's data, "
+        .. "so it isn't counted."):format(learn.name)
     end
     if learn.unconfirmed then
       warnings[#warnings + 1] = ("%s: the pattern is on the auction house; the skill it needs (%d) comes from "
