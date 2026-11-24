@@ -166,7 +166,8 @@ local function delivery(plan, key, market)
       nextRank = nextRank + 1
     end
     local function learnStep(l, icon)
-      local step = { k = "learn", title = "Learn " .. l.name, icon = icon, spell = l.spell }
+      local step = { k = "learn", title = "Learn " .. l.name, icon = icon, spell = l.spell,
+        cost = (not l.unknownCost and (l.cost or 0) > 0) and l.cost or nil }
       if l.how == "ah" then
         step.sub = "Buy the pattern at the auction house (it's on your shopping list), about " .. Money(l.cost)
         put(step, place(withWho(ah, "Auction house")))
@@ -1644,10 +1645,12 @@ local function tail(plan, skillPlan, e, first, carry)
     if how == "trainer" and src.confirmed then
       step.sub = tostring(src.who) .. inZone(src.zone) .. ", " .. Money(src.gold)
       gold = gold + src.gold
+      step.cost = (src.gold or 0) > 0 and src.gold or nil
       put(step, place(src))
     elseif how == "vendor" and src.confirmed then
       step.sub = ("Buy the pattern from %s%s, %s"):format(tostring(src.who), inZone(src.zone), src.label)
       gold = gold + (src.gold or 0)
+      step.cost = (src.gold or 0) > 0 and src.gold or nil
       others = list(src.others)
       put(step, place(src))
       -- A vendor that asks for a standing: the cheapest writs to earn the reputation come first.
@@ -1714,6 +1717,7 @@ local function tail(plan, skillPlan, e, first, carry)
     local l = maker.learn
     gold = gold + l.cost
     steps[#steps + 1] = { k = "learn", spell = maker.spell, icon = maker.item, title = "Learn " .. maker.name,
+      cost = (not l.unknownCost and (l.cost or 0) > 0) and l.cost or nil,
       sub = l.unknownCost and ("At " .. P.A(plan.profession) .. " trainer. What it costs isn't known until you open one")
         or ((l.who and (l.who .. ", ") or "") .. Money(l.cost)) }
   end

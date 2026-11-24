@@ -98,8 +98,9 @@ local function SaveOpenProfession()
     c.recipes[prof] = data
     ns.MarkDirty("recipes")
     -- The first exact list for this profession: goals made from the built-in recipe data are
-    -- worked out again from it.
-    if not old and ns.Planner then ns.Planner.Rebuild(prof) end
+    -- worked out again from it, unless the picked goal's plan is under way (it stays as it is
+    -- until Refresh).
+    if not old and ns.PlanOutdated then ns.PlanOutdated(prof) end
   end
   for id in pairs(data.recipes) do
     if type(id) == "number" then ns.recipeProf[id] = prof end

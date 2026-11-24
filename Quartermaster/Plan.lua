@@ -271,8 +271,9 @@ local function View()
 end
 
 -- True while the goal showing has a worked-out plan with a step still to do.
-local function InProgress()
-  local plan = active and Plans() and Plans()[active]
+local function InProgress(profession)
+  profession = profession or active
+  local plan = profession and Plans() and Plans()[profession]
   if not plan or plan.stub or not plan.selected then return false end
   local ok, v = pcall(ViewOf, plan)
   if not ok or not (v and v.ready) then return false end
@@ -293,26 +294,46 @@ local function Money(copper)
   return table.concat(parts, " ")
 end
 
--- The cost line under the dropdowns: what the goal costs against the gold you have right now.
--- What the cost is made of is in its tooltip.
+local function Count(item, withBank)
+  if not (item and GetItemCount) then return 0 end
+  return Try(GetItemCount, item, withBank and true or false) or 0
+end
+
+-- What the plan still has to spend, from now: the materials you're still short (as the table
+-- counts them) and the fees of learn steps not done yet. Gold already spent on the plan isn't in
+-- it, so buying the materials doesn't make you "short".
+local function StillToSpend(v)
+  local left = 0
+  for _, mat in ipairs(v and v.mats or {}) do
+    local short = math.max(0, (mat.need or 0) - Count(mat.item, true))
+    if short > 0 and mat.each then left = left + short * mat.each end
+  end
+  for _, step in ipairs(v and v.steps or {}) do
+    if step.k == "learn" and not step.done and type(step.cost) == "number" then left = left + step.cost end
+  end
+  return math.floor(left + 0.5)
+end
+
+-- The cost line under the dropdowns: what the goal costs, against the gold you have right now
+-- (green when it covers what's still to spend). What the cost is made of is in its tooltip.
 local function CostText(v)
   local costs = v and v.ready and v.target and type(v.target.costs) == "table" and v.target.costs or nil
   if not costs then return nil end
   local total = costs.total or 0
   local have = Try(GetMoney) or 0
   return "Cost |cffffffff" .. Money(total) .. "|r   You have "
-    .. (have >= total and "|cff40ff40" or "|cffff4040") .. Money(have) .. "|r"
+    .. (have >= StillToSpend(v) and "|cff40ff40" or "|cffff4040") .. Money(have) .. "|r"
 end
 
--- How much gold the goal is short, for the line under the materials' total: "37s 66c short".
--- Nil when you have enough.
+-- How much gold the plan is short of what it still has to spend, for the line under the
+-- materials' total: "37s 66c short". Nil when you have enough.
 local function ShortText(v)
   local costs = v and v.ready and v.target and type(v.target.costs) == "table" and v.target.costs or nil
   if not costs then return nil end
-  local total = costs.total or 0
+  local left = StillToSpend(v)
   local have = Try(GetMoney) or 0
-  if have >= total then return nil end
-  return "|cffff4040" .. Money(total - have) .. " short|r"
+  if have >= left then return nil end
+  return "|cffff4040" .. Money(left - have) .. " short|r"
 end
 
 local function CostTooltip(self)
@@ -333,11 +354,6 @@ local function CostTooltip(self)
     GameTooltip:AddLine("No Auctionator data: this counts vendor and trainer prices only.", 1, 0.5, 0.25, true)
   end
   GameTooltip:Show()
-end
-
-local function Count(item, withBank)
-  if not (item and GetItemCount) then return 0 end
-  return Try(GetItemCount, item, withBank and true or false) or 0
 end
 
 -- "3/10" in red or green, and how much of what you have is in the bank rather than your bags.
@@ -401,6 +417,14 @@ local function Progress(step)
   elseif k == "craft" then
     return ns.profSkill and step.profession and ns.profSkill[step.profession] or nil, step.skill
   end
+end
+
+-- A craft step whose crafts are all made while the skill is still short of where it should be:
+-- skill-ups came slower than the odds. Returns the skill now, or nil.
+local function Behind(step)
+  if step.k ~= "craft" or step.done or not (step.made and step.n and step.skill) then return nil end
+  local skill = ns.profSkill and step.profession and ns.profSkill[step.profession]
+  if skill and step.made >= step.n and skill < step.skill then return skill end
 end
 
 local function IsDone(v, i, step)
@@ -530,7 +554,7 @@ local function OnCraft(_, unit, _, spellID)
       for _, step in ipairs(ViewOf(plan).steps) do
         if step.spell == spellID and not step.done and (step.k == "make" or step.k == "craft") then
           planned = true
-          if step.k == "make" and not counted then
+          if not counted then
             step.made = (step.made or 0) + 1
             counted = true
           end
@@ -694,6 +718,12 @@ end
 -- Only Refresh or picking a goal works it out again.
 local function Want(fresh)
   if active then ns.Planner.Want(active, not fresh and InProgress() or false) end
+end
+
+-- The game recorded something new for a profession (its first exact recipe list): its goals are
+-- worked out again, unless the picked goal's plan is under way.
+function ns.PlanOutdated(profession)
+  ns.Planner.Want(profession, InProgress(profession))
 end
 
 function ns.PlanShowProfession(name)
@@ -872,6 +902,15 @@ function ns.PlanPick(index, id)
     end
     ids[index] = id
   end
+  -- The goals picked already: nothing changes, and a plan under way stays as it is.
+  local before = PickedIds(plan)
+  if #before == #ids then
+    local same = true
+    for i, picked in ipairs(ids) do
+      if before[i] ~= picked then same = false end
+    end
+    if same then return true end
+  end
   if plan.fixed then
     -- Ready-made goals can't be combined: just the one.
     return ns.PlanSelect(ids[1])
@@ -893,9 +932,12 @@ function ns.PlanSelect(id)
     plan.multi, plan.picked = nil, nil
     prefs.selected, prefs.picked = id, nil
     ns.MarkDirty("plan")
+    -- A new goal: its plan is worked out now, from what you have at this moment.
+    Want(true)
+  else
+    -- The goal already picked: a plan under way stays as it is.
+    Want()
   end
-  -- Its plan is worked out now, from what you have at this moment.
-  Want(true)
   ns.PlanCheck()
   return true
 end
@@ -1597,7 +1639,13 @@ local function LayoutStep(row, i, step, current)
   local sub = step.sub
   row.sub:SetPoint("TOPLEFT", row.top, "BOTTOMLEFT", 0, -3)
   row.sub:SetPoint("RIGHT", row, "RIGHT", -2, 0)
-  row.sub:SetText(sub and ((step.done and GREY or KIND_COLOR[step.k] or WHITE) .. sub .. "|r") or "")
+  sub = sub and ((step.done and GREY or KIND_COLOR[step.k] or WHITE) .. sub .. "|r")
+  local behind = Behind(step)
+  if behind then
+    sub = (sub and (sub .. "\n") or "") .. ("|cffff8040Unlucky with skill-ups: %s is %d after the %d crafts planned, not %d. "
+      .. "Press Refresh to plan the rest from here.|r"):format(tostring(step.profession), behind, step.n, step.skill)
+  end
+  row.sub:SetText(sub or "")
   local h = math.max(34, 20 + (sub and (row.sub:GetStringHeight() or 10) or 0) + 4)
   row:SetHeight(h)
   return h
@@ -1972,7 +2020,12 @@ function Refresh()
   for i = used + 1, #rows do rows[i]:Hide() end
   window.content:SetHeight(math.max(10, y + 8))
   local working = ns.Planner.Pending(plan) or (active and ns.Planner.Busy(active))
-  window.progress:SetText(working and "Working it out..." or (done .. " of " .. #v.steps .. " steps done"))
+  local behind = false
+  for _, step in ipairs(v.steps or {}) do
+    if Behind(step) then behind = true end
+  end
+  window.progress:SetText(working and "Working it out..." or (done .. " of " .. #v.steps .. " steps done"
+    .. (behind and "   |cffff8040skill-ups behind: Refresh|r" or "")))
 end
 
 -- When the profession window closes, the plan goes with it, however it was opened.
