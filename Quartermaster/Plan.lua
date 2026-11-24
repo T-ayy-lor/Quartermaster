@@ -198,7 +198,44 @@ BankSteps = function(plan, v)
     end
   end
   if stop then out[#out + 1] = stop end
-  for _, step in ipairs(v.steps or {}) do out[#out + 1] = step end
+  local byItem = {}
+  for _, mat in ipairs(v.mats or {}) do byItem[mat.item] = mat end
+  for _, step in ipairs(v.steps or {}) do
+    -- Bad luck left this craft short: what it takes from here is bought right before it, and
+    -- only now that it's needed.
+    if step.k == "craft" and (step.extra or 0) > 0 and not step.done then
+      -- Worked out until there's something to buy; once there is, it stays (so it ticks off).
+      if not (step.extraStop and #step.extraStop > 0) and type(step.reagents) == "table" and GetItemCountFn then
+        local items, names, buys = {}, {}, {}
+        for _, pair in ipairs(step.reagents) do
+          local mat = pair[1] and byItem[pair[1]]
+          local want = (pair[2] or 1) * math.max(0, step.n + step.extra - (step.made or 0))
+          local have = mat and (Try(GetItemCountFn, mat.item, true) or 0) or 0
+          if mat and want > have then
+            if mat.where == "auction house" or not (mat.map and mat.x) then
+              items[#items + 1] = { item = mat.item, want = want }
+              names[#names + 1] = (want - have) .. " " .. tostring(mat.name or "")
+            else
+              buys[#buys + 1] = { k = "buy", item = mat.item, icon = mat.item, n = want - have, target = want,
+                title = "Bad luck: buy " .. (want - have) .. " more " .. tostring(mat.name or ""),
+                sub = tostring(mat.where or "") .. ", for the extra crafts", map = mat.map, x = mat.x, y = mat.y,
+                where = mat.where, near = mat.near }
+            end
+          end
+        end
+        local stops = {}
+        if #items > 0 then
+          stops[1] = { k = "auction", items = items, icon = items[1].item, near = "auctioneer",
+            title = "Bad luck: buy " .. #items .. " more " .. (#items == 1 and "material" or "materials") .. " at the auction house",
+            sub = table.concat(names, ", ") }
+        end
+        for _, b in ipairs(buys) do stops[#stops + 1] = b end
+        step.extraStop = stops
+      end
+      for _, extra in ipairs(step.extraStop or {}) do out[#out + 1] = extra end
+    end
+    out[#out + 1] = step
+  end
   return out
 end
 local function ViewOf(plan)
@@ -234,6 +271,24 @@ local function ViewOf(plan)
             order[#order + 1] = need[mat.item]
           end
           need[mat.item].need = need[mat.item].need + (mat.need or 0)
+        end
+      end
+    end
+  end
+  -- Bad luck: the materials for the extra crafts a craft step now takes (see Luck).
+  local meta = type(plan.items) == "table" and plan.items or {}
+  for _, step in ipairs(v.steps) do
+    if step.k == "craft" and (step.extra or 0) > 0 and type(step.reagents) == "table" then
+      for _, pair in ipairs(step.reagents) do
+        local item = pair[1]
+        if item then
+          if not need[item] then
+            local m = meta[item] or {}
+            need[item] = { item = item, name = m.name or ("item " .. item), need = 0, each = m.each, where = m.where,
+              map = m.map, x = m.x, y = m.y, near = m.near }
+            order[#order + 1] = need[item]
+          end
+          need[item].need = need[item].need + step.extra * (pair[2] or 1)
         end
       end
     end
@@ -419,12 +474,72 @@ local function Progress(step)
   end
 end
 
--- A craft step whose crafts are all made while the skill is still short of where it should be:
--- skill-ups came slower than the odds. Returns the skill now, or nil.
+----------------------------------------------------------------------
+-- Bad luck with skill-ups
+----------------------------------------------------------------------
+-- The plan's craft counts are what the odds expect. When a craft step's crafts are all made and
+-- the skill is still short, the plan carries on to the next recipe if it can be made at the skill
+-- you have (lower skill makes it more likely to give points, so it makes them up). Only when
+-- nothing can carry on (the last recipe, or the next one needs more skill) is anything more bought:
+-- a "buy more" step right before that craft, for the crafts it now takes from where you are.
+
+local function SkillOf(step)
+  return ns.profSkill and step.profession and ns.profSkill[step.profession] or nil
+end
+
+-- Crafts a step's recipe is expected to take from `skill` to the step's skill; nil when it would
+-- go grey on the way.
+local function CraftsFor(step, skill)
+  local d = step.diff
+  if type(d) ~= "table" or not (ns.P and ns.P.Chance) then return nil end
+  local n = 0
+  for s = skill, step.skill - 1 do
+    local p = ns.P.Chance(s, d)
+    if p <= 0 then return nil end
+    n = n + 1 / p
+  end
+  return math.max(1, math.ceil(n - 1e-6))
+end
+
+-- Works out what bad luck means for each craft step whose crafts are all made: carry on, buy more,
+-- or (the recipe gives no more points) Refresh. Returns true when anything changed.
+local function Luck(v)
+  local changed = false
+  for i, step in ipairs(v.steps) do
+    if step.k == "craft" and not step.done and step.n and step.skill and step.diff then
+      local skill = SkillOf(step)
+      if skill and skill < step.skill and (step.made or 0) >= step.n + (step.extra or 0) then
+        local nextCraft
+        for j = i + 1, #v.steps do
+          local s = v.steps[j]
+          if s.k == "craft" and not s.done and s.profession == step.profession then
+            nextCraft = s
+            break
+          end
+        end
+        if nextCraft and nextCraft.spell ~= step.spell and type(nextCraft.diff) == "table"
+          and skill >= (nextCraft.diff[1] or math.huge) then
+          step.carried = skill
+          changed = true
+        else
+          local more = CraftsFor(step, skill)
+          if more then
+            step.extra, step.extraStop, step.stuck = (step.extra or 0) + more, nil, nil
+            step.extraAt = skill
+          else
+            step.stuck = skill
+          end
+          changed = true
+        end
+      end
+    end
+  end
+  return changed
+end
+
+-- A step that needs a Refresh: bad luck and its recipe gives no more points.
 local function Behind(step)
-  if step.k ~= "craft" or step.done or not (step.made and step.n and step.skill) then return nil end
-  local skill = ns.profSkill and step.profession and ns.profSkill[step.profession]
-  if skill and step.made >= step.n and skill < step.skill then return skill end
+  return step.k == "craft" and not step.done and step.stuck ~= nil
 end
 
 local function IsDone(v, i, step)
@@ -433,6 +548,9 @@ local function IsDone(v, i, step)
     -- In your bags, or nothing of it left in the bank to take.
     local bags, total = Count(step.item, false), Count(step.item, true)
     return bags >= (step.want or step.n or 0) or total <= bags
+  elseif k == "craft" and step.carried then
+    -- Bad luck, but the next recipe carries on from here.
+    return true
   elseif k == "buy" or k == "collect" or k == "make" or k == "craft" or k == "currency" or k == "auction" or k == "writ" or k == "rep" then
     local have, need = Progress(step)
     return have ~= nil and need ~= nil and have >= need
@@ -471,7 +589,14 @@ local Refresh
 
 -- Ticks off every step that's now finished. A step you ticked or unticked by hand is left alone.
 local function CheckSteps(v)
-  local changed = false
+  local changed = Luck(v)
+  -- Extra crafts with nothing to buy yet: looked at again as the bags change.
+  for _, step in ipairs(v.steps) do
+    if step.k == "craft" and (step.extra or 0) > 0 and not step.done and not (step.extraStop and #step.extraStop > 0) then
+      views[v.plan] = nil
+    end
+  end
+  if changed then views[v.plan] = nil end
   -- Buying steps without a fixed target count from what you hold when they come up. A run of
   -- them in a row starts counting together, since you'll buy them in one trip.
   local first = CurrentStep(v)
@@ -530,6 +655,8 @@ local function Check()
   Refresh()
 end
 ns.PlanCheck = Check
+-- The plan showing, as the window lays it out (for the tests).
+function ns.PlanView() return View() end
 
 function ns.PlanToggleStep(i)
   local v = View()
@@ -1640,11 +1767,18 @@ local function LayoutStep(row, i, step, current)
   row.sub:SetPoint("TOPLEFT", row.top, "BOTTOMLEFT", 0, -3)
   row.sub:SetPoint("RIGHT", row, "RIGHT", -2, 0)
   sub = sub and ((step.done and GREY or KIND_COLOR[step.k] or WHITE) .. sub .. "|r")
-  local behind = Behind(step)
-  if behind then
-    sub = (sub and (sub .. "\n") or "") .. ("|cffff8040Unlucky with skill-ups: %s is %d after the %d crafts planned, not %d. "
-      .. "Press Refresh to plan the rest from here.|r"):format(tostring(step.profession), behind, step.n, step.skill)
+  local luck
+  if step.k == "craft" and step.carried then
+    luck = ("|cff9d9d9dUnlucky: %s %d after the %d crafts planned. The next recipe makes up the rest.|r")
+      :format(tostring(step.profession), step.carried, step.n)
+  elseif Behind(step) then
+    luck = ("|cffff8040Unlucky: %s %d, and this recipe gives no more points. Press Refresh to plan the rest from here.|r")
+      :format(tostring(step.profession), step.stuck)
+  elseif step.k == "craft" and (step.extra or 0) > 0 then
+    luck = ("|cffff8040Unlucky: %s was %d after the crafts planned, so about %d more are needed (bought in the step above).|r")
+      :format(tostring(step.profession), step.extraAt or 0, step.extra)
   end
+  if luck then sub = (sub and (sub .. "\n") or "") .. luck end
   row.sub:SetText(sub or "")
   local h = math.max(34, 20 + (sub and (row.sub:GetStringHeight() or 10) or 0) + 4)
   row:SetHeight(h)

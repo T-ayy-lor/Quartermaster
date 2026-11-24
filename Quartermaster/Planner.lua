@@ -1201,6 +1201,7 @@ function P.PlanSkill(key, profession, target, opts)
     local r = bySpell[st.spell]
     final.learned[r.spell] = true
     st.crafts = whole(st.expected)
+    st.difficulty, st.reagents = r.difficulty, r.reagents
     local ops = {}
     -- The camp station these crafts are made beside: one, before the first stretch that needs it.
     if r.needs then
@@ -1337,6 +1338,7 @@ function P.PlanSkill(key, profession, target, opts)
     if st.low < 1 then anyLuck = true end
   end
   if anyLuck then warnings[#warnings + 1] = P.CHANCE_NOTE end
+
 
   -- What's left at the end that the plan made (products).
   local leftovers, leftBy = {}, {}

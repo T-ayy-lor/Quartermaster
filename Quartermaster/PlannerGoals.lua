@@ -200,7 +200,9 @@ local function delivery(plan, key, market)
     steps[#steps + 1] = { k = "craft", spell = st.spell, skill = st.to, profession = plan.profession,
       title = "Craft " .. st.name,
       sub = ("Until %s %d, %s%d craft%s"):format(plan.profession, st.to, about, st.crafts, plural(st.crafts)),
-      icon = st.item, n = st.crafts }
+      icon = st.item, n = st.crafts,
+      -- For bad luck, worked out live in the window: how the recipe's chances go, and what one takes.
+      diff = st.difficulty and copy(st.difficulty) or nil, reagents = st.reagents and copy(st.reagents) or nil }
   end
 
   local need = {}
