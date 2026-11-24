@@ -291,14 +291,17 @@ function P.NearestSeller(key, item, known)
     zone = info and info.name or nil }
 end
 
--- The same, with an estimated price (4x what a vendor pays for it), for ordinary goods with no
--- price known at all.
+-- The same, with its price: the game's own vendor price (built in), else an estimate (4x what a
+-- vendor pays for it), for ordinary goods with no price known at all.
 function P.VendorGuess(key, item)
+  local fact = ns.itemFacts and ns.itemFacts[item]
   local sell = P.Item(item).sell
   if not sell and C_Item and C_Item.GetItemInfo then sell = select(11, C_Item.GetItemInfo(item)) end
-  if type(sell) ~= "number" or sell <= 0 then return nil end
+  local unit, real = fact and fact.b, fact and fact.b and true or false
+  if not unit and type(sell) == "number" and sell > 0 then unit = sell * 4 end
+  if not unit then return nil end
   local spot = P.NearestSeller(key, item)
-  if spot then spot.unit = sell * 4 end
+  if spot then spot.unit, spot.real = unit, real end
   return spot
 end
 
@@ -434,6 +437,98 @@ local function RecordNow()
   end
 end
 
+----------------------------------------------------------------------
+-- A started plan is kept through /reload and logging out
+----------------------------------------------------------------------
+
+-- A copy that the saved data can hold: plain values only, no functions, no loops.
+local function Plain(v, seen)
+  local kind = type(v)
+  if kind == "string" or kind == "number" or kind == "boolean" then return v end
+  if kind ~= "table" then return nil end
+  seen = seen or {}
+  if seen[v] then return nil end
+  seen[v] = true
+  local out = {}
+  for k, x in pairs(v) do
+    local kk = type(k)
+    if kk == "string" or kk == "number" then out[k] = Plain(x, seen) end
+  end
+  seen[v] = nil
+  return out
+end
+
+local function TargetOf(plan, id)
+  if id == "multi" then return plan.multi end
+  for _, t in ipairs(plan.targets or {}) do
+    if t.id == id then return t end
+  end
+end
+
+-- The picked goal's plan as worked out, with the progress on its steps, or nil when there's
+-- nothing to keep (nothing picked, not worked out, or every step done).
+function Planner.Snapshot(plan)
+  local id = plan and plan.selected
+  local t = id and TargetOf(plan, id)
+  if not (t and t.planned and not t.no and t.level) then return nil end
+  local level = type(plan.levels) == "table" and plan.levels[t.level]
+  if type(level) ~= "table" then return nil end
+  local open = false
+  for _, list in ipairs({ level.steps or {}, t.tail or {} }) do
+    for _, step in ipairs(list) do
+      if not step.done then open = true end
+    end
+  end
+  if not open then return nil end
+  local goal = tostring(id)
+  return Plain({ id = id, target = t, level = level, levelKey = t.level, items = plan.items,
+    usedMats = type(plan.usedMats) == "table" and plan.usedMats[goal] or nil, at = time and time() or 0 })
+end
+
+-- Puts a kept plan back in place of working it out again. True when it did.
+local function Restore(plan, kept)
+  if type(kept) ~= "table" or kept.id == nil or plan.selected ~= kept.id then return false end
+  if type(kept.target) ~= "table" or type(kept.level) ~= "table" or kept.levelKey == nil then return false end
+  if kept.id == "multi" then
+    if not plan.multi then return false end
+    plan.multi = kept.target
+  else
+    local t = TargetOf(plan, kept.id)
+    if not t then return false end
+    for k, v in pairs(kept.target) do t[k] = v end
+  end
+  local t = TargetOf(plan, kept.id)
+  t.planned, t.no = true, nil
+  plan.levels = type(plan.levels) == "table" and plan.levels or {}
+  plan.levels[kept.levelKey] = kept.level
+  if type(kept.items) == "table" then
+    plan.items = type(plan.items) == "table" and plan.items or {}
+    for item, meta in pairs(kept.items) do
+      if plan.items[item] == nil then plan.items[item] = meta end
+    end
+  end
+  if type(kept.usedMats) == "table" then
+    plan.usedMats = type(plan.usedMats) == "table" and plan.usedMats or {}
+    plan.usedMats[tostring(kept.id)] = kept.usedMats
+  end
+  -- Picking another goal works everything out afresh (the kept steps belong to this one).
+  plan.restored = kept.id
+  return true
+end
+
+-- Only the first time a profession's goals are worked out after logging in: Refresh, or
+-- anything later, works them out from scratch.
+local restoreTried = {}
+
+ns.On("PLAYER_LOGOUT", function()
+  for profession, plan in pairs(plans) do
+    if not plan.fixed and not plan.stub then
+      local ok, kept = pcall(Planner.Snapshot, plan)
+      Prefs(profession).kept = ok and kept or nil
+    end
+  end
+end)
+
 -- Works a profession's goals out from scratch, then the plan of the goal that's picked.
 local function Build(profession)
   local key = ns.PlayerKey()
@@ -459,7 +554,14 @@ local function Build(profession)
       plan.selected = multi.ids[1]
     end
   end
-  if plan.selected then G.PlanGoal(plan, plan.selected) end
+  -- The plan you'd started before a /reload or logging out comes back as it was.
+  local first = not restoreTried[profession]
+  restoreTried[profession] = true
+  local restored = first and plan.selected and Restore(plan, prefs.kept)
+  if not restored then
+    prefs.kept = nil
+    if plan.selected then G.PlanGoal(plan, plan.selected) end
+  end
   plans[profession] = plan
 end
 
@@ -488,7 +590,8 @@ end
 function Planner.Want(profession, keep)
   local plan = profession and plans[profession]
   if not plan or plan.fixed then return end
-  if plan.stub or (plan.version ~= version and not keep) then
+  if plan.stub or (plan.version ~= version and not keep)
+    or (plan.restored ~= nil and plan.selected ~= plan.restored) then
     Planner.Rebuild(profession)
     return
   end

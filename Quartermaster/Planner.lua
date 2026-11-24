@@ -180,6 +180,9 @@ end
 function P.ItemLevel(item)
   local req = P.Item(item).req
   if type(req) == "number" and req > 0 then return req end
+  -- The game's own item data, built in.
+  local fact = ns.itemFacts and ns.itemFacts[item]
+  if fact then return fact.l end
   local live = P.LiveLevel(item)
   return (type(live) == "number" and live > 0) and live or nil
 end
@@ -598,7 +601,7 @@ function P.Recipes(key, profession)
       -- Not learned yet: what learning the profession teaches with it counts as known.
       knows = auto[spell] and true or false
     elseif ids then knows = ids[spell] or false else knows = P.Knows(key, spell) and true or false end
-    out[spell] = { name = ref.n or ("recipe " .. spell), item = ref.i, min = 1, known = knows, reagents = reagents }
+    out[spell] = { name = ref.n or ("recipe " .. spell), item = ref.i, min = ref.y or 1, known = knows, reagents = reagents }
   end
   return { savedAt = known and c.knownRecipes.savedAt or nil, recipes = out, fromDatabase = true }
 end
@@ -624,8 +627,10 @@ local TANNING = {}
 for _, spell in ipairs({ 1255087,1255085,1255086,1255084,1255083,1255082,1255081,1255080,1255078,1255079,1255077,1255076,1255075,1255071,1255070,1255068,1255069,1255067,1255066,1255065,1255064,1255063,1255062,1255061,1255060,1255011,1255009,1255010,1255008,1255007,1255005,1255006,1255004,1255003,1255001,1255002,1255000,23399,3778,22711,10619,10621,10630,19047,10647,10632,10650,19050 }) do TANNING[spell] = true end
 
 -- Things towns have, which a recipe may name but nobody has to bring.
+-- (Some are in one place only, Moonwell or Black Forge: a plan doesn't send you there.)
 local FIXTURES = { ["Anvil"] = true, ["Forge"] = true, ["Black Anvil"] = true, ["Black Forge"] = true,
-  ["Cooking Fire"] = true }
+  ["Cooking Fire"] = true, ["Alchemy Lab"] = true, ["Radiant Forge"] = true, ["Icebellow Anvil"] = true,
+  ["Moonwell"] = true }
 
 -- The item with this name: something a recipe makes, or an item on record. The lowest ID wins.
 local byName
@@ -646,20 +651,49 @@ function P.ItemByName(name)
 end
 function P.ForgetNames() byName = nil end
 
+-- The built-in recipe facts (Recipes.lua) for one recipe, or nil.
+local recipeRef
+function P.RecipeRef(spell)
+  if not recipeRef then
+    recipeRef = {}
+    for _, d in pairs(ns.recipeData or {}) do
+      for s, r in pairs(d.r or {}) do recipeRef[s] = r end
+    end
+  end
+  return recipeRef[spell]
+end
+
+-- The tool to bring for a tool name: one you hold that counts as it (a Gnomish Army Knife is a
+-- spanner and a hammer), else the tool itself.
+local function ToolItem(key, name, owned)
+  local alts = ns.toolItems and ns.toolItems[name]
+  if type(alts) == "table" and alts[1] then
+    for _, item in ipairs(alts) do
+      if (owned[item] and owned[item].total or 0) > 0 then return item end
+    end
+    return alts[1]
+  end
+  return P.ItemByName(name)
+end
+
 -- What a recipe has to be made with or beside, beyond its materials: { { item, keep } }, or nil.
 -- keep = true is a tool you hold on to (a Runed Silver Rod); false is a camp station, used up
--- when placed. What the profession window recorded wins over the built-in list.
+-- when placed. From the game's own data (built in), or what the profession window recorded.
 function P.Needs(key, profession, spell)
   local c = P.Char(key)
   local seen = c and c.recipes and c.recipes[profession]
   local r = seen and type(seen.recipes) == "table" and seen.recipes[spell]
+  local ref = P.RecipeRef(spell)
+  local names = (ref and type(ref.q) == "table" and ref.q) or (type(r) == "table" and type(r.needs) == "table" and r.needs) or nil
   local out = {}
-  if type(r) == "table" and type(r.needs) == "table" then
-    for _, name in ipairs(r.needs) do
+  if names then
+    local owned
+    for _, name in ipairs(names) do
       if P.STATIONS[name] then
         out[#out + 1] = { P.STATIONS[name], false }
       elseif not FIXTURES[name] then
-        local item = P.ItemByName(name)
+        owned = owned or P.Owned(key)
+        local item = ToolItem(key, name, owned)
         if item then out[#out + 1] = { item, true } end
       end
     end
@@ -707,6 +741,18 @@ function P.Market(key)
         m.vendors[item] = v
         unit, source = v.unit, "vendor"
       end
+      if not unit then
+        -- Any other ordinary vendor good (sold by 20 or more vendors in Questie's data, nothing
+        -- a recipe makes): the game's own vendor price, built in, at the nearest one. A real
+        -- price, so it's weighed against the auction house like any other.
+        local near = P.VendorGuess(key, item)
+        if near and near.real then
+          v = { unit = near.unit, name = near.name, builtin = true,
+            spot = { map = near.map, x = near.x, y = near.y, zone = near.zone } }
+          m.vendors[item] = v
+          unit, source = v.unit, "vendor"
+        end
+      end
       local p = P.Price(item)
       if p and (not unit or p < unit) then unit, source = p, "ah" end
       if not unit then
@@ -715,7 +761,7 @@ function P.Market(key)
         -- often stock only one or two (Strange Dust, Copper Modulators), and the guess can be low.
         local guess = P.VendorGuess(key, item)
         if guess then
-          v = { unit = guess.unit, name = guess.name, guess = true,
+          v = { unit = guess.unit, name = guess.name, guess = not guess.real,
             spot = { map = guess.map, x = guess.x, y = guess.y, zone = guess.zone } }
           m.vendors[item] = v
           unit, source = v.unit, "vendor"
