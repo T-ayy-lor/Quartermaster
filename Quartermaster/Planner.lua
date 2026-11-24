@@ -863,9 +863,12 @@ local Run = {}
 Run.__index = Run
 P.Run = Run
 
-function P.NewRun(recipes, market, owned, weight, noMake, prepaid)
+function P.NewRun(recipes, market, owned, weight, noMake, prepaid, mats)
   local run = setmetatable({
     prepaid = prepaid or {},       -- recipes whose learning cost doesn't count against them
+    mats = mats or {},             -- recipes it may learn only to make materials (Bolt of Silk Cloth)
+    skillNow = 0,                  -- the skill the materials are got at (for those recipes)
+    bySpell = {},
     noMake = noMake or {},         -- items never to make from sub-materials (buy them instead)
     recipes = recipes, market = market,
     inv = copy(owned),
@@ -878,6 +881,7 @@ function P.NewRun(recipes, market, owned, weight, noMake, prepaid)
   }, Run)
   for _, r in ipairs(recipes) do
     if r.known then run.learned[r.spell] = true end
+    run.bySpell[r.spell] = r
     if r.item then
       run.makers[r.item] = run.makers[r.item] or {}
       table.insert(run.makers[r.item], r)
@@ -908,7 +912,10 @@ function Run:acquire(item, n, inv, ops, depth, stack)
   end
   if depth < 3 and not (stack and stack[item]) and not self.noMake[item] then
     for _, maker in ipairs(self.makers[item] or {}) do
-      if self.learned[maker.spell] then
+      -- A recipe not learned can be, only to make this material, once the skill allows it.
+      local l, now = maker.learn, self.skillNow
+      local learnNow = not self.learned[maker.spell]
+      if not learnNow or (self.mats[maker.spell] and l and l.skill <= now and maker.required <= now) then
         local crafts = short / maker.makes
         if self.whole then crafts = whole(crafts) end
         local trial, trialOps = trialOf(inv), {}
@@ -927,6 +934,7 @@ function Run:acquire(item, n, inv, ops, depth, stack)
           -- Anything made beyond what's needed stays in the bags for later.
           local extra = crafts * maker.makes - short
           if extra > EPS then trial[item] = (trial[item] or 0) + extra end
+          if learnNow then trialOps[#trialOps + 1] = { "learn", maker.spell } end
           trialOps[#trialOps + 1] = { "make", maker.spell, crafts }
           bestSoft, bestGold, bestInv, bestOps, bestS = g + s, g, trial, trialOps, s
         end
@@ -948,6 +956,7 @@ end
 -- cost, and the items that can't be had (no price, no known recipe), if any.
 function Run:equip(recipe, inv, ops, commit, skill)
   local gold, soft, missing = 0, 0, nil
+  self.skillNow = skill or 0
   for _, need in ipairs(recipe.needs or {}) do
     local item, keep = need[1], need[2]
     if not self.placed[item] then
@@ -992,6 +1001,7 @@ end
 function Run:craftOnce(recipe, skill, inv, ops)
   local p = chance(skill, recipe.difficulty)
   if p <= 0 then return nil end
+  self.skillNow = skill
   local crafts = 1 / p
   local gold, soft = 0, 0
   for _, reagent in ipairs(recipe.reagents) do
@@ -1069,6 +1079,14 @@ function Run:walk(skill, target)
     end
     local g, _, crafts = self:craftOnce(recipe, skill, self.inv, ops)
     g = g + stationGold
+    -- Recipes learned just now only to make materials: their fee is counted with the learning.
+    for _, op in ipairs(ops) do
+      if op[1] == "learn" and not self.learned[op[2]] then
+        self.learned[op[2]] = true
+        pre = pre or {}
+        pre[#pre + 1] = self.bySpell[op[2]]
+      end
+    end
     self.commits[#self.commits + 1] = { recipe = recipe, skill = skill, crafts = crafts, gold = g,
       chance = chance(skill, recipe.difficulty), ops = ops, learn = learn, pre = pre }
     skill = skill + recipe.points
@@ -1089,6 +1107,42 @@ end
 ----------------------------------------------------------------------
 -- The skill plan
 ----------------------------------------------------------------------
+
+local MATERIAL_MIN = 100 -- a recipe learned only for materials must save at least this much (1s) past its fee
+
+-- Recipes not learned on the walk that would make something it buys for less than it pays, by
+-- more than the recipe costs to learn, counted from the skill each one can be learned at.
+-- Returns a set of spells, or nil.
+function P.MaterialLearns(run, recipes, market)
+  local out
+  for _, r in ipairs(recipes) do
+    if not run.learned[r.spell] and r.learn and r.item then
+      local make = 0
+      for _, reagent in ipairs(r.reagents) do
+        local unit = market.buy(reagent[1])
+        if not unit then make = nil break end
+        make = make + unit * reagent[2]
+      end
+      if make then
+        make = make / r.makes
+        local start, saves = max(r.required, r.learn.skill), 0
+        for _, c in ipairs(run.commits) do
+          if c.skill >= start then
+            for _, op in ipairs(c.ops) do
+              if op[1] == "buy" and op[2] == r.item then saves = saves + op[3] * (op[5] - make) end
+            end
+          end
+        end
+        if saves > r.learn.cost + MATERIAL_MIN then
+          out = out or {}
+          out[r.spell] = true
+        end
+      end
+    end
+    P.Yield()
+  end
+  return out
+end
 
 -- A plan for taking `profession` to `target`. opts: includeAHPatterns (default true), noMake,
 -- weights (the "save owned materials" weights to try), market, recipes (to reuse).
@@ -1123,28 +1177,35 @@ function P.PlanSkill(key, profession, target, opts)
   for item, e in pairs(ownedFull) do owned[item] = e.total end
 
   local run, reached, bestGold
-  for _, weight in ipairs(opts.weights or OWNED_WEIGHTS) do
-    local trial = P.NewRun(recipes, market, owned, weight, opts.noMake)
-    local got = trial:walk(skill, target)
-    local trials = { { trial, got } }
-    -- A recipe the walk ends up learning is paid for either way. Walk again with those counted
-    -- as paid, so each is switched to where it's cheapest, not where it has paid itself off.
-    local paid, any = {}, false
-    for _, commit in ipairs(trial.commits) do
-      if commit.learn then paid[commit.recipe.spell] = true; any = true end
-    end
-    if any then
-      local again = P.NewRun(recipes, market, owned, weight, opts.noMake, paid)
-      trials[2] = { again, again:walk(skill, target) }
-    end
-    for _, t in ipairs(trials) do
-      local gold = t[1]:gold()
-      -- Furthest skill first, then least gold.
-      if not run or t[2] > reached or (t[2] == reached and gold < bestGold) then
-        run, reached, bestGold = t[1], t[2], gold
+  local function walks(mats)
+    for _, weight in ipairs(opts.weights or OWNED_WEIGHTS) do
+      local trial = P.NewRun(recipes, market, owned, weight, opts.noMake, nil, mats)
+      local got = trial:walk(skill, target)
+      local trials = { { trial, got } }
+      -- A recipe the walk ends up learning is paid for either way. Walk again with those counted
+      -- as paid, so each is switched to where it's cheapest, not where it has paid itself off.
+      local paid, any = {}, false
+      for _, commit in ipairs(trial.commits) do
+        if commit.learn then paid[commit.recipe.spell] = true; any = true end
+      end
+      if any then
+        local again = P.NewRun(recipes, market, owned, weight, opts.noMake, paid, mats)
+        trials[2] = { again, again:walk(skill, target) }
+      end
+      for _, t in ipairs(trials) do
+        local gold = t[1]:gold()
+        -- Furthest skill first, then least gold.
+        if not run or t[2] > reached or (t[2] == reached and gold < bestGold) then
+          run, reached, bestGold = t[1], t[2], gold
+        end
       end
     end
   end
+  walks()
+  -- Materials the plan buys that a recipe it could learn would make for less (Bolt of Silk
+  -- Cloth from Silk Cloth): walk again allowing those recipes, each learned when first used.
+  local mats = P.MaterialLearns(run, recipes, market)
+  if mats then walks(mats) end
   if reached < target then
     warnings[#warnings + 1] = ("No recorded recipe gives skill points past %d, so the plan stops there. "
       .. "Visiting more trainers and vendors may open more recipes."):format(reached)
@@ -1167,7 +1228,7 @@ function P.PlanSkill(key, profession, target, opts)
       learns[#learns + 1] = l
     end
     local last = stretches[#stretches]
-    if last and last.spell == r.spell and last.to == commit.skill and not rankAt[commit.skill] then
+    if last and last.spell == r.spell and last.to == commit.skill and not rankAt[commit.skill] and not commit.pre then
       last.to = last.to + r.points
       last.expected = last.expected + commit.crafts
       last.low = min(last.low, commit.chance)
@@ -1203,12 +1264,12 @@ function P.PlanSkill(key, profession, target, opts)
     st.crafts = whole(st.expected)
     st.difficulty, st.reagents = r.difficulty, r.reagents
     local ops = {}
+    for _, l in ipairs(st.pre or {}) do final.learned[l.spell] = true end
     -- The camp station these crafts are made beside: one, before the first stretch that needs it.
     if r.needs then
       for _, need in ipairs(r.needs) do
         if not need[2] and not final.placed[need[1]] then st.station = need[1] end
       end
-      for _, l in ipairs(st.pre or {}) do final.learned[l.spell] = true end
       local _, _, missing = final:equip(r, final.inv, ops, true, st.from)
       st.missing = missing
     end
