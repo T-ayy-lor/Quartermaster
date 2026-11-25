@@ -1110,14 +1110,20 @@ end
 -- Skill levels worth aiming for: the ones that earn a Legacy point (Forever's achievements for
 -- reaching 150, 225 and 300 in a profession: Journeyman, Expert and Artisan).
 G.LEGACY = { 150, 225, 300 }
-local function checkpoints(skill, profession)
+-- Secondary professions earn no Legacy point (the user, 2026-11-24): the same rank tops, plain.
+G.SECONDARY = { Cooking = true, ["First Aid"] = true, Fishing = true }
+local function checkpoints(skill, profession, english)
   local out = {}
+  local secondary = G.SECONDARY[english or profession]
   for _, at in ipairs(G.LEGACY) do
     local name
     for _, rank in ipairs(RANKS) do
       if rank[1] == at then name = rank[2] end
     end
-    if name then
+    if name and secondary then
+      out[#out + 1] = { skill = at, name = ("%s %d: top of %s"):format(profession, at, name),
+        lines = { ("The top of %s."):format(name) } }
+    elseif name then
       out[#out + 1] = { skill = at, name = ("%s %d: top of %s (Legacy point)"):format(profession, at, name),
         lines = { ("The top of %s. Reaching %d earns a Legacy point."):format(name, at) } }
     else
@@ -1278,7 +1284,7 @@ function G.Catalog(key, profession)
   local plan = { key = key, profession = profession, title = title, skill = skill, cap = cap, unlearned = prof.unlearned,
     gathering = gathering, levels = {}, plans = {}, items = {}, targets = {}, groups = {},
     fromDatabase = recorded.fromDatabase, cache = {} }
-  local marks = checkpoints(skill, profession)
+  local marks = checkpoints(skill, profession, english)
 
   -- A crafting profession the built-in recipe data knows nothing about, whose window has never
   -- been opened: nothing can be planned yet. The checkpoints are listed, with what to do.
