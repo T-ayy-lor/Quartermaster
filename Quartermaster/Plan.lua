@@ -1765,7 +1765,9 @@ local function LayoutStep(row, i, step, current)
 
   local sub = step.sub
   row.sub:SetPoint("TOPLEFT", row.top, "BOTTOMLEFT", 0, -3)
-  row.sub:SetPoint("RIGHT", row, "RIGHT", -2, 0)
+  -- A set width, not a right-hand anchor: the game only knows a wrapped line's height once its
+  -- width is known, and an anchored one isn't until the next frame (long lines ran over the row below).
+  row.sub:SetWidth(ROW_WIDTH - 60)
   sub = sub and ((step.done and GREY or KIND_COLOR[step.k] or WHITE) .. sub .. "|r")
   local luck
   if step.k == "craft" and step.carried then
