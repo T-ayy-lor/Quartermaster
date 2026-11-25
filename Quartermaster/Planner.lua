@@ -241,6 +241,10 @@ function P.NearestSeller() return nil end
 -- { map, x, y, name }, or nil. (PlannerJobs.lua asks Questie when it's installed.)
 function P.NpcPlaces() return nil end
 
+-- The trainers of a profession for the character's faction, as NPC IDs, from another addon's
+-- data (PlannerJobs.lua asks Questie), or nil.
+function P.ProfessionTrainers() return nil end
+
 -- The reputation a character has earned with a faction (by name), in all: Neutral starts at 0,
 -- Friendly at 3000. Nil when it isn't recorded.
 function P.Reputation(key, faction)
@@ -544,6 +548,16 @@ function P.RecipeDB(key, profession)
     end
   end
   return data and data.r or {}
+end
+
+-- A profession's skill line (171 for Alchemy), or nil.
+function P.SkillLine(key, profession)
+  local prof = P.Prof(key, profession)
+  if prof and prof.skillLine and ns.recipeData and ns.recipeData[prof.skillLine] then return prof.skillLine end
+  for line, d in pairs(ns.recipeData or {}) do
+    if d.name == profession then return line end
+  end
+  return nil
 end
 
 -- Whether the character knows a recipe, asked from the game (PlannerJobs.lua). Used when
@@ -879,15 +893,31 @@ function P.BuildRecipes(key, profession, includeAHPatterns, market)
               end
             end
             local trainers = refs.src and refs.src[spell] and refs.src[spell].t
+            -- Built in from Wowhead's Forever database: what a trainer charges (ref.tc), and
+            -- whether a vendor sells the pattern (ref.w has 5), at the game's own price for it.
+            local fromTrainer, fromVendor = false, false
+            for _, w in ipairs(list(ref.w)) do
+              if w == 6 then fromTrainer = true elseif w == 5 then fromVendor = true end
+            end
+            local shelf = scroll and fromVendor and not costs and ns.itemFacts and ns.itemFacts[scroll]
+              and ns.itemFacts[scroll].b or nil
+            local ahPrice = scroll and includeAHPatterns and P.Price(scroll) or nil
             if dataVendor then
               learn = { how = "vendor", cost = dataGold, skill = required, item = scroll, data = { dataVendor },
                 who = (refs.names and refs.names[dataVendor]) or "a vendor" }
-            elseif scroll and includeAHPatterns and P.Price(scroll) then
-              learn = { how = "ah", cost = P.Price(scroll), skill = required, item = scroll, unconfirmed = true }
-            elseif trainers then
-              -- Taught by trainers, in Classic's data. What it costs isn't known until one is
-              -- opened, so it's counted as nothing and the plan says so.
-              learn = { how = "trainer", cost = 0, skill = required, data = trainers, unknownCost = true }
+            elseif shelf and shelf > 0 and not (ahPrice and ahPrice < shelf) then
+              learn = { how = "vendor", cost = floor(shelf + 0.5), skill = required, item = scroll,
+                data = refs.src and refs.src[spell] and refs.src[spell].v, seller = scroll, who = "a vendor" }
+            elseif ahPrice then
+              learn = { how = "ah", cost = ahPrice, skill = required, item = scroll, unconfirmed = true }
+            elseif ref.tc then
+              learn = { how = "trainer", cost = ref.tc, skill = required, data = trainers, anyTrainer = true,
+                who = P.A(profession) .. " trainer" }
+            elseif trainers or fromTrainer then
+              -- Taught by trainers, but what it costs isn't in any data: counted as nothing, and
+              -- the plan says so.
+              learn = { how = "trainer", cost = 0, skill = required, data = trainers, unknownCost = true,
+                anyTrainer = true }
             elseif costs then
               skip("costs something other than gold")
               ok = false
@@ -1412,21 +1442,32 @@ function P.PlanSkill(key, profession, target, opts)
       local npc = P.Npc(learn.npc)
       learn.map, learn.x, learn.y, learn.zone = npc.map, npc.x, npc.y, npc.subzone or npc.zone
     end
-    if learn.data and learn.map == nil then
+    -- A pattern any vendor of its kind sells: the nearest one that does (Questie's data).
+    if learn.seller and learn.map == nil then
+      local shop = P.NearestSeller(key, learn.seller, true)
+      if shop then
+        learn.map, learn.x, learn.y, learn.zone, learn.who = shop.map, shop.x, shop.y, shop.zone, shop.name or learn.who
+        learn.data = nil
+      end
+    end
+    -- Any trainer of the profession teaches it: your faction's trainers, when they're known.
+    local ids = learn.anyTrainer and learn.map == nil and P.ProfessionTrainers(key, profession) or learn.data
+    if ids and learn.map == nil then
       -- A trainer or vendor you haven't opened: the nearest one Questie's data has a place for.
       local here, best = P.Here(), nil
-      for _, id in ipairs(learn.data) do
+      for _, id in ipairs(ids) do
         for _, spot in ipairs(P.NpcPlaces(id) or {}) do
           if not best or better(spot, 0, best, 0, here) then best = spot end
         end
       end
       if best then
         learn.map, learn.x, learn.y = best.map, best.x, best.y
-        learn.who = learn.who or best.name
+        -- "an Alchemy trainer" becomes the one found.
+        learn.who = (learn.anyTrainer and best.name) or learn.who or best.name
       end
     end
     if learn.unknownCost then
-      warnings[#warnings + 1] = ("%s: taught by trainers (Classic's data). Trainer fees aren't in the game's data, "
+      warnings[#warnings + 1] = ("%s: taught by trainers. What they charge for it isn't in any data, "
         .. "so it isn't counted."):format(learn.name)
     end
     if learn.unconfirmed then

@@ -4,7 +4,7 @@ A profession companion for World of Warcraft: Forever. Pick a goal (a skill leve
 gear upgrade) and it works out the cheapest way there from what you own, vendor and trainer
 prices, and auction prices. The steps tick themselves off as you go.
 
-**Version 1.0.10.**
+**Version 1.0.11.**
 
 ## Requirements
 
@@ -48,4 +48,5 @@ could mail it to you: the same ruleset and faction. Banks and mail count from yo
 ## License
 
 MIT (see `LICENSE`). Recipe data from LibProfessionDB by Pimptasty, MIT (see
-`THIRD-PARTY-NOTICES.txt`).
+`THIRD-PARTY-NOTICES.txt`). Trainer fees and where recipes come from are taken from
+Wowhead's WoW Forever database (wowhead.com/forever).

@@ -442,7 +442,41 @@ local function recipeSource(ctx, spell, name, ref)
     return done({ how = "auto", confirmed = true, label = "", lines = { "Learned with the profession." } })
   end
 
-  -- 5. Classic's data, which Forever may have changed.
+  -- 5. Forever's own sources, built in from Wowhead's Forever database: what a trainer charges
+  -- for it, or that vendors sell its pattern (at the game's own price for the pattern).
+  local wh = {}
+  for _, w in ipairs(list(ref.w)) do wh[w] = true end
+  if ref.tc or wh[6] then
+    local src
+    if ref.tc then
+      src = { how = "trainer", gold = ref.tc, confirmed = true, label = Money(ref.tc),
+        lines = { ("Taught by %s trainers for %s."):format(profession, Money(ref.tc)) } }
+    else
+      src = { how = "trainer", confirmed = false, label = "trainer",
+        lines = { ("Taught by %s trainers. What it costs isn't in any data."):format(profession) } }
+    end
+    locate(src, P.ProfessionTrainers(key, profession) or known.t or {}, names)
+    src.who = src.who or (P.A(profession) .. " trainer")
+    return done(src)
+  end
+  local shelf = scroll and wh[5] and ns.itemFacts and ns.itemFacts[scroll] and ns.itemFacts[scroll].b or nil
+  if shelf and shelf > 0 then
+    local gold = floor(shelf + 0.5)
+    local src = { how = "vendor", gold = gold, others = {}, confirmed = true, label = Money(gold), item = scroll }
+    local shop = P.NearestSeller(key, scroll, true)
+    if shop then
+      src.who, src.map, src.x, src.y, src.zone = shop.name, shop.map, shop.x, shop.y, shop.zone
+      src.lines = { ("Sold by %s%s for %s."):format(tostring(shop.name), inZone(shop.zone), Money(gold)),
+        ("Where %s stands comes from Questie's data."):format(tostring(shop.name)) }
+    else
+      src.who = "a vendor"
+      src.lines = { ("Sold by vendors for %s."):format(Money(gold)) }
+      if known.v then locate(src, known.v, names) end
+    end
+    return done(src)
+  end
+
+  -- 6. Classic's data, which Forever may have changed.
   local note = " (Classic data, not confirmed for Forever)"
   if known.t then
     return done(locate({ how = "trainer", confirmed = false, label = "trainer",
@@ -469,8 +503,15 @@ local function recipeSource(ctx, spell, name, ref)
     return done({ how = "ah", gold = ah, confirmed = false, label = Money(ah) .. " at the AH", item = scroll,
       lines = { ("The pattern is on the auction house for %s."):format(Money(ah)) } })
   end
+  -- Forever's own recipes, which Classic's data doesn't have.
+  if wh[4] then
+    return done({ how = "quest", confirmed = true, label = "quest", lines = { "A quest reward." } })
+  end
+  if wh[2] then
+    return done({ how = "drop", confirmed = true, label = "drop", lines = { "The pattern drops in the world." } })
+  end
   return done({ how = "unknown", confirmed = false, label = "?",
-    lines = { "No source is known yet. Opening more trainers and vendors may find it." } })
+    lines = { "Where this recipe comes from isn't in any data yet." } })
 end
 
 ----------------------------------------------------------------------

@@ -179,6 +179,33 @@ function P.NpcPlaces(id)
   return found or nil
 end
 
+-- A profession's trainers for the character's faction, as NPC IDs, from Questie's own list of
+-- them (its Townsfolk module, by skill line). Nil without Questie, or before it has started.
+local trainerIds = {}
+function P.ProfessionTrainers(key, profession)
+  if key ~= ns.PlayerKey() then return nil end
+  if not (type(QuestieLoader) == "table" and QuestieLoader.ImportModule) then return nil end
+  local line = P.SkillLine(key, profession)
+  if not line then return nil end
+  if trainerIds[line] then return trainerIds[line] end
+  local ok, out = pcall(function()
+    local folk = QuestieLoader:ImportModule("Townsfolk")
+    local db = QuestieLoader:ImportModule("QuestieDB")
+    local ids = type(folk) == "table" and type(folk.professionTrainers) == "table" and folk.professionTrainers[line]
+    if type(ids) ~= "table" or #ids == 0 then return nil end
+    local mine = (P.Info(key).faction or ""):sub(1, 1) -- "A" or "H"
+    local found = {}
+    for i = 1, #ids do
+      local friendly = db.QueryNPCSingle(ids[i], "friendlyToFaction")
+      if type(friendly) ~= "string" or mine == "" or friendly:find(mine, 1, true) then found[#found + 1] = ids[i] end
+    end
+    return #found > 0 and found or nil
+  end)
+  -- Questie may still be starting up: nothing is remembered until it answers.
+  if ok and out then trainerIds[line] = out end
+  return ok and out or nil
+end
+
 -- Every Craftsman's Writ, from Questie's quest data (read once, a little at a time): the writ's
 -- item, the item it asks for, what it pays with the commerce factions, and who takes it.
 -- How many of the item a writ asks for isn't in that data: one is assumed.
