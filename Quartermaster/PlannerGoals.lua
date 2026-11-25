@@ -112,10 +112,15 @@ end
 -- The step for training a rank: done once the profession's cap is past where it was.
 local function rankStep(profession, rank)
   local at = rank.who and (rank.who .. inZone(rank.zone)) or (P.A(profession) .. " trainer")
-  local step = { k = "rank", profession = profession, cap = rank.cap,
+  -- The fee is built in for most ranks. A trainer the built-in lists don't cover may not teach it.
+  local fee = (rank.fee or 0) > 0 and (", " .. Money(rank.fee)) or ""
+  local unsure = rank.who and rank.fee and not rank.sure and ". Whether this trainer teaches it isn't in the data yet" or ""
+  local step = { k = "rank", profession = profession, cap = rank.cap, cost = (rank.fee or 0) > 0 and rank.fee or nil,
+    teach = rank.spell,
     title = rank.cap == 0 and ("Learn %s"):format(profession) or ("Train %s %s"):format(rank.name, profession),
-    sub = rank.cap == 0 and ("At %s. You haven't learned it yet; what it costs isn't counted"):format(at)
-      or ("At %s. It raises the cap past %d"):format(at, rank.cap) }
+    sub = rank.cap == 0 and (rank.fee and ("At %s%s. You haven't learned it yet%s"):format(at, fee, unsure)
+        or ("At %s. You haven't learned it yet; what it costs isn't counted"):format(at))
+      or ("At %s%s. It raises the cap past %d%s"):format(at, fee, rank.cap, unsure) }
   return put(step, place(rank))
 end
 
@@ -167,6 +172,7 @@ local function delivery(plan, key, market)
     end
     local function learnStep(l, icon)
       local step = { k = "learn", title = "Learn " .. l.name, icon = icon, spell = l.spell,
+        teach = l.how == "trainer" and l.spell or nil,
         cost = (not l.unknownCost and (l.cost or 0) > 0) and l.cost or nil }
       if l.how == "ah" then
         step.sub = "Buy the pattern at the auction house (it's on your shopping list), about " .. Money(l.cost)
@@ -455,7 +461,9 @@ local function recipeSource(ctx, spell, name, ref)
       src = { how = "trainer", confirmed = false, label = "trainer",
         lines = { ("Taught by %s trainers. What it costs isn't in any data."):format(profession) } }
     end
-    locate(src, P.ProfessionTrainers(key, profession) or known.t or {}, names)
+    -- The trainers known to teach it (built in), else any of the profession's.
+    local teachers = P.Teachers(key, spell)
+    locate(src, #teachers > 0 and teachers or P.ProfessionTrainers(key, profession) or known.t or {}, names)
     src.who = src.who or (P.A(profession) .. " trainer")
     return done(src)
   end
@@ -1730,6 +1738,7 @@ local function tail(plan, skillPlan, e, first, carry, count)
   if learning then
     local how = src.how
     local step = { k = "learn", spell = e.spell, icon = e.item, title = "Learn " .. e.name }
+    if how == "trainer" then step.teach = e.spell end
     if how == "trainer" and src.confirmed then
       step.sub = tostring(src.who) .. inZone(src.zone) .. ", " .. Money(src.gold)
       gold = gold + src.gold

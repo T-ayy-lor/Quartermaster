@@ -140,9 +140,22 @@ local function PlaceOf(step)
       return npc.map, npc.x, npc.y, name, npc
     end
   end
-  if type(step.map) == "number" and type(step.x) == "number" and type(step.y) == "number" then
-    return step.map, step.x, step.y, step.where
+  local fixed = type(step.map) == "number" and type(step.x) == "number" and type(step.y) == "number"
+  -- Something a trainer teaches: the nearest trainer known to teach it from where you are now,
+  -- when that's nearer than the one the plan named when it was worked out.
+  if step.teach and ns.P and ns.P.Teachers and ns.P.NearestOf and ns.P.Here then
+    local ok, spot = pcall(function()
+      local here = ns.P.Here()
+      local ids = here and ns.P.Teachers(ns.PlayerKey(), step.teach) or {}
+      local best = #ids > 0 and ns.P.NearestOf(ns.PlayerKey(), ids) or nil
+      if best and fixed and not ns.P.Better(best, 0, { map = step.map, x = step.x, y = step.y }, 0, here) then return nil end
+      return best
+    end)
+    if ok and spot and type(spot.map) == "number" and type(spot.x) == "number" and type(spot.y) == "number" then
+      return spot.map, spot.x, spot.y, spot.name or step.where, spot
+    end
   end
+  if fixed then return step.map, step.x, step.y, step.where end
 end
 
 -- "Take it from your bank" steps, first in the list: one for each material the plan needs that's
@@ -362,7 +375,7 @@ local function StillToSpend(v)
     if short > 0 and mat.each then left = left + short * mat.each end
   end
   for _, step in ipairs(v and v.steps or {}) do
-    if step.k == "learn" and not step.done and type(step.cost) == "number" then left = left + step.cost end
+    if (step.k == "learn" or step.k == "rank") and not step.done and type(step.cost) == "number" then left = left + step.cost end
   end
   return math.floor(left + 0.5)
 end
@@ -944,10 +957,17 @@ local function GoalLabel(t, plan, inList)
     skill = color .. t.skill .. "|r  "
   end
   if t.known then return IconText(t.icon, t) .. skill .. name .. ready end
+  -- What's shown is what the recipe itself costs to get ("recipe 20s"), until the goal has been
+  -- worked out: then it's what the whole plan costs (the user, 2026-11-24, at "Dusky Bracers 20s"
+  -- over a 2g plan: "why does it say 20silver").
   local cost = ""
-  if t.cost and t.cost ~= "" then
+  local total = type(t.costs) == "table" and tonumber(t.costs.total) or nil
+  if total and total > 0 then
+    local have = Try(GetMoney) or 0
+    cost = "   " .. (have >= total and GREEN or RED) .. Money(total) .. "|r"
+  elseif t.cost and t.cost ~= "" then
     local afford = CanAfford(t)
-    cost = "   " .. (afford == true and GREEN or (afford == false and RED or GOLD)) .. t.cost .. "|r"
+    cost = "   " .. (afford == true and GREEN or (afford == false and RED or GOLD)) .. "recipe " .. t.cost .. "|r"
   end
   return IconText(t.icon, t) .. skill .. name .. cost
 end
@@ -1391,6 +1411,9 @@ local function RowTooltip(self)
         0.7, 0.7, 0.7, true)
     end
   end
+  if step.teach and place and npc and npc.name and npc.name ~= step.where then
+    GameTooltip:AddLine("Nearest now: " .. tostring(npc.name) .. (npc.zone and (" in " .. tostring(npc.zone)) or ""), 0.7, 0.7, 0.7, true)
+  end
   -- Pointing the way is TomTom's: without it, clicks only craft or search the auction house.
   if not HasTomTom() then place = nil end
   -- By way of a flight master, when that's quicker.
@@ -1764,6 +1787,16 @@ local function LayoutStep(row, i, step, current)
   row.top:SetText((step.done and GREY or (i == current and GOLD or WHITE)) .. i .. ". " .. title .. "|r")
 
   local sub = step.sub
+  -- Something a trainer teaches: when a trainer known to teach it is nearer than the one the plan
+  -- named, the row names that one (the plan itself stays as it was worked out).
+  if step.teach and not step.done then
+    local place, _, _, name, npc = PlaceOf(step)
+    if place and npc and npc.npc and name and name ~= step.where then
+      sub = (step.k == "rank" and "At " or "") .. tostring(name) .. (npc.zone and (" in " .. tostring(npc.zone)) or "")
+        .. (step.cost and (", " .. Money(step.cost)) or "")
+        .. ((step.k == "rank" and (step.cap or 0) > 0) and (". It raises the cap past " .. step.cap) or "")
+    end
+  end
   row.sub:SetPoint("TOPLEFT", row.top, "BOTTOMLEFT", 0, -3)
   -- A set width, not a right-hand anchor: the game only knows a wrapped line's height once its
   -- width is known, and an anchored one isn't until the next frame (long lines ran over the row below).

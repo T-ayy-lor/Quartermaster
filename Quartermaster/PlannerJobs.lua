@@ -206,6 +206,98 @@ function P.ProfessionTrainers(key, profession)
   return ok and out or nil
 end
 
+-- Whether the character's faction can use an NPC (Questie's data; yes when it doesn't say).
+local friendlyCache = {}
+function P.NpcUsable(key, id)
+  if not (type(QuestieLoader) == "table" and QuestieLoader.ImportModule) then return true end
+  local mine = (P.Info(key).faction or ""):sub(1, 1) -- "A" or "H"
+  if mine == "" then return true end
+  local friendly = friendlyCache[id]
+  if friendly == nil then
+    local ok, out = pcall(function()
+      return QuestieLoader:ImportModule("QuestieDB").QueryNPCSingle(id, "friendlyToFaction")
+    end)
+    friendly = ok and type(out) == "string" and out or false
+    friendlyCache[id] = friendly
+  end
+  return friendly == false or friendly:find(mine, 1, true) ~= nil
+end
+
+-- A map's name, from the game.
+function P.ZoneName(map)
+  local info = map and C_Map and C_Map.GetMapInfo and ns.Try(C_Map.GetMapInfo, map)
+  return info and info.name or nil
+end
+
+-- Every banker, auctioneer and mailbox for the character's faction, from Questie's own lists (its
+-- Townsfolk module), so the nearest is known without ever having opened it: { { map, x, y, name } }.
+local FOLK = { banker = "Banker", auctioneer = "Auctioneer", mailbox = "Mailbox" }
+local folkSpots = {}
+local function Folk(key, kind)
+  if folkSpots[kind] then return folkSpots[kind] end
+  if not (FOLK[kind] and type(QuestieLoader) == "table" and QuestieLoader.ImportModule) then return nil end
+  local ok, out = pcall(function()
+    local folk = QuestieLoader:ImportModule("Townsfolk")
+    local db = QuestieLoader:ImportModule("QuestieDB")
+    local zones = QuestieLoader:ImportModule("ZoneDB")
+    local spots = {}
+    if kind == "mailbox" then
+      local faction = P.Info(key).faction
+      local mine = type(folk.factionSpecificTownsfolk) == "table" and faction and folk.factionSpecificTownsfolk[faction]
+      local ids = type(mine) == "table" and mine.Mailbox
+      if type(ids) ~= "table" then return nil end
+      for i = 1, #ids do
+        local spawns = db.QueryObjectSingle(ids[i], "spawns")
+        for area, points in pairs(type(spawns) == "table" and spawns or {}) do
+          local map = zones:GetUiMapIdByAreaId(area)
+          for _, pt in ipairs(type(map) == "number" and type(points) == "table" and points or {}) do
+            if type(pt) == "table" and type(pt[1]) == "number" and type(pt[2]) == "number" and pt[1] >= 0 then
+              spots[#spots + 1] = { map = map, x = pt[1], y = pt[2], name = "Mailbox" }
+            end
+          end
+        end
+      end
+    else
+      local ids = type(folk.townsfolk) == "table" and folk.townsfolk[FOLK[kind]]
+      if type(ids) ~= "table" then return nil end
+      for i = 1, #ids do
+        if P.NpcUsable(key, ids[i]) then
+          for _, spot in ipairs(P.NpcPlaces(ids[i]) or {}) do spots[#spots + 1] = spot end
+        end
+      end
+    end
+    return #spots > 0 and spots or nil
+  end)
+  -- Questie may still be starting up: nothing is remembered until it answers.
+  if ok and out then folkSpots[kind] = out end
+  return ok and out or nil
+end
+
+-- The nearest place of a kind: the recorded ones (Planner.lua) and, for banks, auction houses and
+-- mailboxes, every one Questie lists. Worked out at most once a second for each kind.
+local recordedNearest = P.Nearest
+local nearCache = {}
+function P.Nearest(key, kind)
+  local mine = recordedNearest(key, kind)
+  if key ~= ns.PlayerKey() or not FOLK[kind] then return mine end
+  local now = GetTime and GetTime() or 0
+  local cached = nearCache[kind]
+  if cached and now - cached.at < 1 then return cached.spot or mine end
+  local here, best = P.Here(), nil
+  -- Without a place to measure from, the one you used last is the one to name.
+  if here or not mine then
+    for _, spot in ipairs(Folk(key, kind) or {}) do
+      if not best or P.Better(spot, 0, best, 0, here) then best = spot end
+    end
+  end
+  local pick
+  if best and (not mine or P.Better(best, 0, mine, 0, here)) then
+    pick = { map = best.map, x = best.x, y = best.y, name = best.name, zone = P.ZoneName(best.map) }
+  end
+  nearCache[kind] = { at = now, spot = pick }
+  return pick or mine
+end
+
 -- Every Craftsman's Writ, from Questie's quest data (read once, a little at a time): the writ's
 -- item, the item it asks for, what it pays with the commerce factions, and who takes it.
 -- How many of the item a writ asks for isn't in that data: one is assumed.

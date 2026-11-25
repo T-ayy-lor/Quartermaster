@@ -245,6 +245,83 @@ function P.NpcPlaces() return nil end
 -- data (PlannerJobs.lua asks Questie), or nil.
 function P.ProfessionTrainers() return nil end
 
+-- Whether an NPC is one the character's faction can use, and a map's name, from the game or
+-- another addon's data (PlannerJobs.lua). Outside the game: yes, and no name.
+function P.NpcUsable() return true end
+function P.ZoneName() return nil end
+
+-- What each trainer teaches, built in (ns.trainerData, from Wowhead's Forever database): trainers
+-- of one profession don't all teach the same ranks and recipes, and their titles don't say which.
+-- True or false when the trainer's list is known, nil when it isn't.
+local teachSets = {}
+function P.Teaches(npc, spell)
+  local d = ns.trainerData
+  local n = d and d.npcs and d.npcs[tonumber(npc) or npc]
+  if not n then return nil end
+  local set = teachSets[n]
+  if not set then
+    set = {}
+    for _, s in ipairs(d.lists[n] or {}) do set[s] = true end
+    teachSets[n] = set
+  end
+  return set[spell] or false
+end
+
+-- The trainers known to teach a spell that the character's faction can use, as NPC IDs in order.
+local teacherLists = {}
+function P.Teachers(key, spell)
+  local d = ns.trainerData
+  if not (d and d.npcs and spell) then return {} end
+  local all = teacherLists[spell]
+  if not all then
+    all = {}
+    for npc in pairs(d.npcs) do
+      if P.Teaches(npc, spell) then all[#all + 1] = npc end
+    end
+    table.sort(all)
+    teacherLists[spell] = all
+  end
+  local out = {}
+  for _, npc in ipairs(all) do
+    if P.NpcUsable(key, npc) then out[#out + 1] = npc end
+  end
+  return out
+end
+
+-- A profession's rank, built in: { spell, fee (copper), at (the skill it can be trained at) }, or nil.
+function P.RankInfo(key, profession, name)
+  local d = ns.trainerData
+  local line = d and d.ranks and P.SkillLine(key, profession)
+  local ranks = line and d.ranks[line]
+  return ranks and ranks[name] or nil
+end
+
+-- The best of some NPCs to send the character to: the nearest from where they stand, else the
+-- one recorded most recently. A recorded NPC's own position is used; one never met is placed from
+-- another addon's data (P.NpcPlaces). Returns { npc, name, map, x, y, zone }, or nil.
+function P.NearestOf(key, ids)
+  local who, here = P.Info(key), P.Here()
+  local best, bestSeen
+  for _, id in ipairs(ids or {}) do
+    local npc = P.Npc(id)
+    if npc.map and npc.x ~= nil then
+      if (not npc.ruleset or not who.ruleset or (npc.ruleset == who.ruleset and npc.faction == who.faction))
+        and better(npc, npc.savedAt, best, bestSeen, here) then
+        best = { npc = id, name = npc.name, map = npc.map, x = npc.x, y = npc.y, zone = npc.subzone or npc.zone }
+        bestSeen = npc.savedAt
+      end
+    else
+      for _, spot in ipairs(P.NpcPlaces(id) or {}) do
+        if better(spot, 0, best, bestSeen, here) then
+          best = { npc = id, name = spot.name, map = spot.map, x = spot.x, y = spot.y, zone = P.ZoneName(spot.map) }
+          bestSeen = 0
+        end
+      end
+    end
+  end
+  return best
+end
+
 -- The reputation a character has earned with a faction (by name), in all: Neutral starts at 0,
 -- Friendly at 3000. Nil when it isn't recorded.
 function P.Reputation(key, faction)
@@ -277,27 +354,48 @@ function P.Ranks(key, profession, cap, target)
     end
   end
   if #out == 0 then return out end
-  local who, here = info(key), P.Here()
+  local who = info(key)
   local keys = {}
   for npc in pairs(ns.db.account.trainers) do keys[#keys + 1] = npc end
   table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
-  local best, bestName
-  for _, id in ipairs(keys) do
-    local t = ns.db.account.trainers[id]
-    local teaches = false
-    if type(t) == "table" and usable(t, who) then
-      for _, s in ipairs(list(t.services)) do
-        if s.skill == profession then teaches = true break end
+  for _, rank in ipairs(out) do
+    -- Who teaches this rank: the trainers the built-in lists say do, and the profession's recorded
+    -- trainers unless their list is known not to have it (Stormwind's leatherworker stops at
+    -- Journeyman). Then the nearest of them.
+    local known = P.RankInfo(key, profession, rank.name)
+    -- Sure: the built-in lists say so, or the trainer listed the rank when you opened it. Then
+    -- trainers nothing is known about (the profession's others, from Questie). Last, ones you
+    -- opened whose list didn't show the rank.
+    local sure, unknown, unlikely, seen = {}, {}, {}, {}
+    if known then
+      rank.fee, rank.at, rank.spell = known.fee, known.at, known.spell
+      for _, id in ipairs(P.Teachers(key, known.spell)) do sure[#sure + 1] = id; seen[tostring(id)] = true end
+    end
+    for _, id in ipairs(keys) do
+      local t = ns.db.account.trainers[id]
+      if type(t) == "table" and usable(t, who) and not seen[tostring(id)] then
+        local teaches, listed = false, false
+        for _, s in ipairs(list(t.services)) do
+          if s.skill == profession then
+            teaches = true
+            if type(s.name) == "string" and s.name:sub(1, #rank.name + 1) == rank.name .. " " then listed = true end
+          end
+        end
+        if teaches and not (known and P.Teaches(id, known.spell) == false) then
+          seen[tostring(id)] = true
+          if listed or (known and P.Teaches(id, known.spell)) then sure[#sure + 1] = id else unlikely[#unlikely + 1] = id end
+        end
       end
     end
-    local npc = teaches and P.Npc(id)
-    if npc and npc.map and npc.x ~= nil and better(npc, npc.savedAt, best, best and best.savedAt, here) then
-      best, bestName = npc, t.name
+    for _, id in ipairs(P.ProfessionTrainers(key, profession) or {}) do
+      if not seen[tostring(id)] and not (known and P.Teaches(id, known.spell) ~= nil) then unknown[#unknown + 1] = id end
     end
-  end
-  if best then
-    for _, rank in ipairs(out) do
-      rank.who, rank.map, rank.x, rank.y, rank.zone = bestName, best.map, best.x, best.y, best.subzone or best.zone
+    local best = P.NearestOf(key, sure)
+    rank.sure = best ~= nil
+    best = best or P.NearestOf(key, unknown) or P.NearestOf(key, unlikely)
+    if best then
+      local t = ns.db.account.trainers[best.npc] or ns.db.account.trainers[tostring(best.npc)]
+      rank.who, rank.map, rank.x, rank.y, rank.zone = best.name or (t and t.name), best.map, best.x, best.y, best.zone
     end
   end
   return out
@@ -809,6 +907,35 @@ function P.Color(skill, d)
   return "orange"
 end
 
+-- Going somewhere far off to learn a recipe takes time, and the skill walk only counts gold: a
+-- pattern sold in Arathi was picked over a trainer's recipe in town to save 26s (the user,
+-- 2026-11-24: "that's too much travel time"). So a recipe whose nearest source is far from where
+-- the character stands counts as this much dearer when recipes are compared. It is never added
+-- to what the plan costs. Nil when it's near, on the auction house, or there's no telling.
+P.TRIP = 5000       -- 50s
+P.TRIP_NEAR = 1500  -- yards: about a city across
+function P.Trip(key, profession, spell, learn)
+  local here = P.Here()
+  if not here or learn.how == "ah" then return nil end
+  local spot
+  if learn.how == "trainer" then
+    local ids = P.Teachers(key, spell)
+    if learn.npc ~= nil then ids[#ids + 1] = learn.npc end
+    if #ids == 0 then ids = (learn.anyTrainer and P.ProfessionTrainers(key, profession)) or learn.data or {} end
+    spot = P.NearestOf(key, ids)
+  elseif learn.npc ~= nil then
+    spot = P.NearestOf(key, { learn.npc })
+  elseif learn.seller then
+    spot = P.NearestSeller(key, learn.seller, true)
+  elseif learn.data then
+    spot = P.NearestOf(key, learn.data)
+  end
+  if not (spot and spot.map and spot.x) then return nil end
+  local d = P.Distance(here, spot)
+  if d and d <= P.TRIP_NEAR then return nil end
+  return P.TRIP
+end
+
 -- Every recipe of the profession this character could use: ones it knows, and ones it can learn
 -- from a recorded trainer, a recorded vendor (for gold), or a pattern on the auction house.
 -- Returns the recipes (sorted by spell) and how many were left out, by reason. Nil when the
@@ -933,6 +1060,7 @@ function P.BuildRecipes(key, profession, includeAHPatterns, market)
           skip("needs a higher character level")
           ok = false
         end
+        if ok and learn then learn.trip = P.Trip(key, profession, spell, learn) end
         if ok then
           recipes[#recipes + 1] = {
             spell = spell, name = r.name or ref.n or ("recipe " .. spell), item = r.item,
@@ -1113,6 +1241,8 @@ function Run:score(recipe, skill, target)
   if not self.learned[recipe.spell] then
     if recipe.learn.skill > skill then return nil end
     if not self.prepaid[recipe.spell] then total = total + recipe.learn.cost end
+    -- A far-off place to learn it counts against it either way (P.Trip).
+    total = total + (recipe.learn.trip or 0)
   end
   local inv = trialOf(self.inv)
   -- A tool or camp station it needs: one, the first time a recipe needs it.
@@ -1255,8 +1385,11 @@ function P.PlanSkill(key, profession, target, opts)
       warnings[#warnings + 1] = ("You haven't learned %s: the plan starts with learning it at %s trainer. "
         .. "What that costs isn't counted."):format(profession, P.A(profession))
     else
-      warnings[#warnings + 1] = ("Going past %d needs %s %s, trained at %s trainer. What that costs isn't counted.")
-        :format(rank.cap, rank.name, profession, P.A(profession))
+      warnings[#warnings + 1] = rank.fee
+        and ("Going past %d needs %s %s, trained at %s trainer for %s. That fee isn't in the plan's cost.")
+          :format(rank.cap, rank.name, profession, P.A(profession), Money(rank.fee))
+        or ("Going past %d needs %s %s, trained at %s trainer. What that costs isn't counted.")
+          :format(rank.cap, rank.name, profession, P.A(profession))
     end
   end
   local market = opts.market or P.Market(key)
@@ -1287,6 +1420,9 @@ function P.PlanSkill(key, profession, target, opts)
       end
       for _, t in ipairs(trials) do
         local gold = t[1]:gold()
+        for _, commit in ipairs(t[1].commits) do
+          if commit.learn then gold = gold + (commit.learn.trip or 0) end
+        end
         -- Furthest skill first, then least gold.
         if not run or t[2] > reached or (t[2] == reached and gold < bestGold) then
           run, reached, bestGold = t[1], t[2], gold
@@ -1448,6 +1584,17 @@ function P.PlanSkill(key, profession, target, opts)
       if shop then
         learn.map, learn.x, learn.y, learn.zone, learn.who = shop.map, shop.x, shop.y, shop.zone, shop.name or learn.who
         learn.data = nil
+      end
+    end
+    -- Taught by trainers: the nearest one known to teach it, from where you stand (the built-in
+    -- lists, and the trainer you opened), not only the one you happened to open.
+    if learn.how == "trainer" and learn.spell and (P.Here() or learn.npc == nil) then
+      local ids = P.Teachers(key, learn.spell)
+      if learn.npc ~= nil then ids[#ids + 1] = learn.npc end
+      local spot = #ids > 0 and P.NearestOf(key, ids)
+      if spot then
+        learn.npc, learn.map, learn.x, learn.y, learn.zone = spot.npc, spot.map, spot.x, spot.y, spot.zone
+        learn.who = spot.name or learn.who
       end
     end
     -- Any trainer of the profession teaches it: your faction's trainers, when they're known.
