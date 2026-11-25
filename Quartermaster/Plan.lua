@@ -367,15 +367,17 @@ local function StillToSpend(v)
   return math.floor(left + 0.5)
 end
 
--- The cost line under the dropdowns: what the goal costs, against the gold you have right now
--- (green when it covers what's still to spend). What the cost is made of is in its tooltip.
+-- The cost line under the dropdowns: what the goal still costs, going down as you get its
+-- materials and learn its recipes (the user, 2026-11-24: "as i acquire items, this cost should go
+-- down"), against the gold you have right now (green when it covers it). What the whole plan
+-- costs, and what that's made of, is in its tooltip.
 local function CostText(v)
   local costs = v and v.ready and v.target and type(v.target.costs) == "table" and v.target.costs or nil
   if not costs then return nil end
-  local total = costs.total or 0
+  local left = StillToSpend(v)
   local have = Try(GetMoney) or 0
-  return "Cost |cffffffff" .. Money(total) .. "|r   You have "
-    .. (have >= StillToSpend(v) and "|cff40ff40" or "|cffff4040") .. Money(have) .. "|r"
+  return "Cost |cffffffff" .. Money(left) .. "|r   You have "
+    .. (have >= left and "|cff40ff40" or "|cffff4040") .. Money(have) .. "|r"
 end
 
 -- How much gold the plan is short of what it still has to spend, for the line under the
@@ -399,6 +401,7 @@ local function CostTooltip(self)
     GameTooltip:AddDoubleLine(tostring(part[1]), Money(part[2]), 1, 1, 1, 1, 1, 1)
   end
   GameTooltip:AddDoubleLine("Total", Money(costs.total or 0), 1, 0.82, 0, 1, 0.82, 0)
+  GameTooltip:AddDoubleLine("Still to spend", Money(StillToSpend(v)), 1, 0.82, 0, 1, 1, 1)
   GameTooltip:AddDoubleLine("You have", Money(Try(GetMoney) or 0), 0.7, 0.7, 0.7, 1, 1, 1)
   for _, note in ipairs(type(costs.notes) == "table" and costs.notes or {}) do
     GameTooltip:AddLine(note, 0.7, 0.7, 0.7, true)
@@ -1042,6 +1045,47 @@ function ns.PlanPick(index, id)
   end
   if id and #ids == 1 then SelectInProfessionWindow(plan, id) end
   SetPicked(plan, ids)
+  return true
+end
+
+-- How many of the recipe goal in a dropdown to craft. Nil when that dropdown's goal isn't a recipe.
+function ns.PlanCount(index)
+  local plan = Plan()
+  local id = plan and PickedIds(plan)[index]
+  local t = id and Target(plan, id)
+  if not t or t.kind == "skill" or plan.fixed then return nil end
+  return ns.Goals.Count(plan, id)
+end
+
+-- Sets how many of the recipe goal in a dropdown to craft (the count box beside it), and works
+-- its plan out again for that many. Returns true if anything changed.
+function ns.PlanSetCount(index, n)
+  local plan = Plan()
+  local id = plan and PickedIds(plan)[index]
+  local t = id and Target(plan, id)
+  n = tonumber(n)
+  if not t or t.kind == "skill" or plan.fixed or not n then return false end
+  n = math.max(1, math.min(ns.Goals.MAX_COUNT, math.floor(n)))
+  if n == ns.Goals.Count(plan, id) then return false end
+  local prefs = plan.profession and ns.Planner.Prefs(plan.profession) or {}
+  prefs.counts = type(prefs.counts) == "table" and prefs.counts or {}
+  prefs.counts[tostring(id)] = n > 1 and n or nil
+  plan.counts = prefs.counts
+  -- The plan for the old count is gone: worked out afresh, nothing kept from it.
+  prefs.kept, plan.restored = nil, nil
+  t.planned, t.tail, t.mats, t.summary, t.costs = nil, nil, nil, nil, nil
+  if plan.multi then
+    plan.multi = ns.Goals.NewMulti(plan, plan.multi.ids)
+    plan.picked = plan.multi.ids
+  end
+  local goal = tostring(plan.selected)
+  for _, kept in ipairs({ plan.bankSteps, plan.auctionSteps, plan.folds }) do
+    if type(kept) == "table" then kept[goal] = nil end
+  end
+  ns.MarkDirty("plan")
+  ForgetViews()
+  if active then ns.Planner.Want(active) end
+  ns.PlanCheck()
   return true
 end
 
@@ -1824,6 +1868,71 @@ local function Build()
     prof:Hide()
     frame.prof = prof
   end
+  -- How many to craft, left of each recipe goal's dropdown (under the portrait): type a number,
+  -- use the arrows, or the mouse wheel (the user, 2026-11-24).
+  frame.counts = {}
+  function frame.CountBox(i)
+    if frame.counts[i] then return frame.counts[i] end
+    local box = CreateFrame("EditBox", nil, frame, "InputBoxTemplate")
+    box:SetSize(30, 20)
+    box:SetPoint("TOPLEFT", 18, -32 - i * HEADER_ROW - 2)
+    box:SetAutoFocus(false)
+    box:SetNumeric(true)
+    box:SetMaxLetters(3)
+    box:SetJustifyH("CENTER")
+    box:EnableMouseWheel(true)
+    local function set(n)
+      box:ClearFocus()
+      if not ns.PlanSetCount(i, n) then box:SetText(tostring(ns.PlanCount(i) or 1)) end
+    end
+    box:SetScript("OnEnterPressed", function(self) set(self:GetNumber()) end)
+    box:SetScript("OnEditFocusLost", function(self)
+      local n = ns.PlanCount(i)
+      if n and self:GetNumber() ~= n then set(self:GetNumber()) end
+    end)
+    box:SetScript("OnEscapePressed", function(self)
+      self:SetText(tostring(ns.PlanCount(i) or 1))
+      self:ClearFocus()
+    end)
+    box:SetScript("OnMouseWheel", function(_, delta)
+      local n = ns.PlanCount(i)
+      if n then set(n + (delta > 0 and 1 or -1)) end
+    end)
+    box:SetScript("OnEnter", function(self)
+      GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+      GameTooltip:AddLine("How many to craft")
+      GameTooltip:AddLine("Type a number and press Enter, or use the arrows or the mouse wheel.", 1, 1, 1, true)
+      GameTooltip:Show()
+    end)
+    box:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    local function arrow(dir, delta)
+      local b = CreateFrame("Button", nil, frame)
+      b:SetSize(16, 11)
+      b:SetNormalTexture([[Interface\Buttons\Arrow-]] .. dir .. [[-Up]])
+      b:SetPushedTexture([[Interface\Buttons\Arrow-]] .. dir .. [[-Down]])
+      b:SetHighlightTexture([[Interface\Buttons\UI-Common-MouseHilight]], "ADD")
+      b:SetScript("OnClick", function()
+        local n = ns.PlanCount(i)
+        if n then set(n + delta) end
+      end)
+      return b
+    end
+    box.up = arrow("Up", 1)
+    box.up:SetPoint("BOTTOMLEFT", box, "RIGHT", 2, 0)
+    box.down = arrow("Down", -1)
+    box.down:SetPoint("TOPLEFT", box, "RIGHT", 2, 0)
+    function box.ShowCount(n)
+      if n then
+        if not box:HasFocus() then box:SetText(tostring(n)) end
+        box:Show() box.up:Show() box.down:Show()
+      else
+        box:Hide() box.up:Hide() box.down:Hide()
+      end
+    end
+    box.ShowCount(nil)
+    frame.counts[i] = box
+    return box
+  end
   -- One goal dropdown for each goal picked, and one more below them to add another.
   frame.goals = {}
   function frame.GoalDropdown(i)
@@ -1836,6 +1945,7 @@ local function Build()
     pcall(goal.SetupMenu, goal, function(dropdown, root) GoalMenu(dropdown, root, i) end)
     goal:Hide()
     frame.goals[i] = goal
+    frame.CountBox(i)
     return goal
   end
   frame.goal = frame.GoalDropdown(1)
@@ -1986,9 +2096,13 @@ function Refresh()
         if set then pcall(set, dropdown, label) end
         dropdown:Show()
       end
+      if window.counts[i] then window.counts[i].ShowCount(picked[i] and ns.PlanCount(i)) end
     end
   end
   for i = goalRows + 1, #window.goals do window.goals[i]:Hide() end
+  for i, box in pairs(window.counts) do
+    if not hasGoals or i > goalRows then box.ShowCount(nil) end
+  end
   window.headerRows = goalRows
   window.summary:ClearAllPoints()
   window.summary:SetPoint("TOPLEFT", HEADER_LEFT + 8, -32 - (goalRows + 1) * HEADER_ROW - 6)

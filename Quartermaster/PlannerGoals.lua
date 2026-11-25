@@ -1666,8 +1666,19 @@ end
 -- With `carry` (several goals planned together), materials come out of carry.inv, what's left
 -- goes back into it for the next goal, and any Merchant's Favor is earned once for all of them
 -- beforehand (so not here).
-local function tail(plan, skillPlan, e, first, carry)
+-- How many of a recipe goal to craft: what the count box beside its dropdown says (the user,
+-- 2026-11-24), 1 unless set. plan.counts is the profession's saved planPrefs counts.
+G.MAX_COUNT = 200
+function G.Count(plan, id)
+  local n = type(plan) == "table" and type(plan.counts) == "table" and tonumber(plan.counts[tostring(id)]) or 1
+  n = floor(n)
+  if n < 1 then n = 1 elseif n > G.MAX_COUNT then n = G.MAX_COUNT end
+  return n
+end
+
+local function tail(plan, skillPlan, e, first, carry, count)
   local key, market, src = plan.key, plan.market, e.src
+  count = count or 1
   local run = skillPlan.final
   local ahPlace = P.AuctionHouse(key)
   local steps, gold, others, earn, rep = {}, 0, {}, nil, nil
@@ -1728,13 +1739,14 @@ local function tail(plan, skillPlan, e, first, carry)
     if step then steps[#steps + 1] = step end
   end
 
-  -- Materials for one craft, from what's left after the skill plan.
+  -- Materials for the crafts wanted, from what's left after the skill plan.
   local sim = P.NewRun(run and run.recipes or {}, market, inventory, 0, run and run.noMake)
   sim.whole = true
   sim.learned = copy((carry and carry.learned) or (run and run.learned) or {})
   local ops, short = {}, {}
   for _, reagent in ipairs(e.reagents) do
-    if not sim:acquire(reagent[1], reagent[2], sim.inv, ops) then short[#short + 1] = reagent end
+    local want = reagent[2] * count
+    if not sim:acquire(reagent[1], want, sim.inv, ops) then short[#short + 1] = { reagent[1], want } end
   end
   -- A camp station it's made beside, unless the plan already has one by now.
   -- So does a tool (a Runed Silver Rod), which is kept.
@@ -1807,12 +1819,13 @@ local function tail(plan, skillPlan, e, first, carry)
         or "Not sold by any vendor you've visited" }
   end
   if station then steps[#steps + 1] = stationStep(station) end
-  steps[#steps + 1] = { k = "make", spell = e.spell, n = 1, icon = e.item, title = "Craft " .. e.name,
+  steps[#steps + 1] = { k = "make", spell = e.spell, n = count, icon = e.item,
+    title = count > 1 and ("Craft %d %s"):format(count, e.name) or ("Craft " .. e.name),
     sub = carry and "One of your goals" or "The goal of this plan" }
   if carry then
     carry.placed = sim.placed
     -- What's left, and what's now been learned and made, for the next goal.
-    if e.item then sim.inv[e.item] = (sim.inv[e.item] or 0) + (e.makes or 1) end
+    if e.item then sim.inv[e.item] = (sim.inv[e.item] or 0) + (e.makes or 1) * count end
     sim.learned[e.spell] = true
     carry.inv, carry.learned = sim.inv, sim.learned
   end
@@ -1968,7 +1981,7 @@ function G.PlanMulti(plan)
     local e = plan.entries and plan.entries[t.id]
     if e then
       recipes = recipes + 1
-      local tailSteps, mats, extra, others = tail(plan, skillPlan, e, first, carry)
+      local tailSteps, mats, extra, others = tail(plan, skillPlan, e, first, carry, G.Count(plan, t.id))
       gold = gold + extra
       for _, st in ipairs(tailSteps) do
         if st.k == "buy" and st.unit then
@@ -2086,7 +2099,8 @@ function G.PlanGoal(plan, id)
   else
     local e = plan.entries[id]
     local src = e.src
-    local steps, mats, extraGold, others, earn, rep = tail(plan, skillPlan, e, #level.steps == 0)
+    local count = G.Count(plan, id)
+    local steps, mats, extraGold, others, earn, rep = tail(plan, skillPlan, e, #level.steps == 0, nil, count)
     local total = level.cost + extraGold
     local summary = ("Cost %s. You have %s."):format(Money(total), Money(goldHave))
     local costs = costsOf(level, skill, t.level, profession)
@@ -2125,7 +2139,7 @@ function G.PlanGoal(plan, id)
       costs.parts[#costs.parts + 1] = { ("%d crate%s for %d Merchant's Favor"):format(earn.crateCount,
         plural(earn.crateCount), earn.need), floor(earn.gold + 0.5) }
     end
-    local label = "Materials for one"
+    local label = count > 1 and ("Materials for %d"):format(count) or "Materials for one"
     if not e.known then
       label = (src.how == "vendor" or src.how == "ah") and "Pattern and materials" or "Learning it and materials"
     end

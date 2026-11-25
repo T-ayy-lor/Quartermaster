@@ -4,7 +4,7 @@ A profession companion for World of Warcraft: Forever. Pick a goal (a skill leve
 gear upgrade) and it works out the cheapest way there from what you own, vendor and trainer
 prices, and auction prices. The steps tick themselves off as you go.
 
-**Version 1.0.9.**
+**Version 1.0.10.**
 
 ## Requirements
 

@@ -481,7 +481,7 @@ function Planner.Snapshot(plan)
   end
   if not open then return nil end
   local goal = tostring(id)
-  return Plain({ id = id, target = t, level = level, levelKey = t.level, items = plan.items,
+  return Plain({ id = id, count = G.Count(plan, id), target = t, level = level, levelKey = t.level, items = plan.items,
     usedMats = type(plan.usedMats) == "table" and plan.usedMats[goal] or nil, at = time and time() or 0 })
 end
 
@@ -489,6 +489,8 @@ end
 local function Restore(plan, kept)
   if type(kept) ~= "table" or kept.id == nil or plan.selected ~= kept.id then return false end
   if type(kept.target) ~= "table" or type(kept.level) ~= "table" or kept.levelKey == nil then return false end
+  -- Kept for another count of crafts: worked out again.
+  if kept.count ~= nil and kept.count ~= G.Count(plan, kept.id) then return false end
   if kept.id == "multi" then
     if not plan.multi then return false end
     plan.multi = kept.target
@@ -541,6 +543,9 @@ local function Build(profession)
   end
   plan.version = built
   local prefs = Prefs(profession)
+  -- How many of each recipe goal to craft (the count box), saved with the goals picked.
+  prefs.counts = type(prefs.counts) == "table" and prefs.counts or {}
+  plan.counts = prefs.counts
   prefs.showWaypoints = nil -- the waypoint tick box is gone (0.10)
   -- The goal you picked last time, if it's still there to pick; or the several you picked.
   for _, t in ipairs(plan.targets) do
