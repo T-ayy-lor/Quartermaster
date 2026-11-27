@@ -389,7 +389,13 @@ local function CostText(v)
   if not costs then return nil end
   local left = StillToSpend(v)
   local have = Try(GetMoney) or 0
-  return "Cost |cffffffff" .. Money(left) .. "|r   You have "
+  -- A recipe no gold gets (a pattern that only drops and binds when picked up) is said beside
+  -- the cost, so the figure doesn't read as everything the goal takes.
+  local drop = ""
+  for _, step in ipairs(v.steps or {}) do
+    if step.k == "learn" and step.noBuy and not step.done then drop = " |cffff8040+ recipe (drop only)|r" end
+  end
+  return "Cost |cffffffff" .. Money(left) .. "|r" .. drop .. "   You have "
     .. (have >= left and "|cff40ff40" or "|cffff4040") .. Money(have) .. "|r"
 end
 

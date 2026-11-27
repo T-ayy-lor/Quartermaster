@@ -306,6 +306,8 @@ local function recipeSource(ctx, spell, name, ref)
   local key, profession = ctx.key, ctx.profession
   local scroll = ref.p
   local ah = scroll and P.Price(scroll) or nil
+  -- A pattern that binds when picked up (the game's own item data) can't be bought from anyone.
+  local bound = scroll and ns.itemFacts and ns.itemFacts[scroll] and ns.itemFacts[scroll].o and true or false
 
   local function spot(src, npcId)
     local npc = P.Npc(npcId)
@@ -504,6 +506,11 @@ local function recipeSource(ctx, spell, name, ref)
         lines = { ("The pattern is on the auction house for %s."):format(Money(ah)),
           ("It drops from %s%s."):format(whoList(known.d, known.dn), note) } })
     end
+    if bound then
+      return done({ how = "drop", confirmed = false, label = "drop only", bound = true,
+        lines = { ("Can't be bought: the pattern drops from %s%s and binds when picked up.")
+          :format(whoList(known.d, known.dn), note) } })
+    end
     return done({ how = "drop", confirmed = false, label = "drop",
       lines = { ("Drops from %s%s."):format(whoList(known.d, known.dn), note) } })
   end
@@ -516,6 +523,10 @@ local function recipeSource(ctx, spell, name, ref)
     return done({ how = "quest", confirmed = true, label = "quest", lines = { "A quest reward." } })
   end
   if wh[2] then
+    if bound then
+      return done({ how = "drop", confirmed = true, label = "drop only", bound = true,
+        lines = { "Can't be bought: the pattern only drops, and binds when picked up." } })
+    end
     return done({ how = "drop", confirmed = true, label = "drop", lines = { "The pattern drops in the world." } })
   end
   return done({ how = "unknown", confirmed = false, label = "?",
@@ -1783,6 +1794,8 @@ local function tail(plan, skillPlan, e, first, carry, count)
       step = nil
     else
       step.sub = src.lines[1] or "Where to learn it isn't known"
+      -- No gold gets this recipe: the window says so beside the cost.
+      if src.bound then step.noBuy = true end
       -- A trainer or vendor you haven't opened, when another addon knows where it stands.
       put(step, place(src))
     end
